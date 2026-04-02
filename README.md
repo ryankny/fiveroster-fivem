@@ -9,10 +9,11 @@ Official FiveRoster integration for FiveM servers. Allows players to access rost
 - **In-Game Tablet UI** - Beautiful, immersive tablet interface with animations
 - **Shift Tracking** - Players can start and end shifts directly in-game
 - **Auto Shift End** - Automatically ends shifts when players disconnect
+- **Rank-to-Job Sync** - Automatically sync FiveRoster ranks to in-game jobs (ESX/QBCore/QBox)
 - **Multi-Guild Support** - Connect multiple Discord servers (PD, EMS, Fire, etc.)
 - **Multi-Roster Support** - Access all enrolled rosters from one interface
 - **Document Viewer** - View server documents in-game
-- **Framework Support** - Works with ESX, QBCore, or standalone FiveM
+- **Framework Support** - Works with ESX, QBCore, QBox, or standalone FiveM
 - **Multiple Notification Systems** - Native, ox_lib, ESX, or QBCore notifications
 - **Developer Exports** - Full API for integration with MDTs and other resources
 
@@ -165,6 +166,105 @@ ServerConfig.APIKeys = {
 
 - Players can only have **one active shift at a time** across all rosters
 - Attempting to start a second shift will show an error with the current roster name
+
+## Rank-to-Job Synchronization
+
+Automatically sync FiveRoster ranks to in-game jobs and grades. When a player's rank changes on FiveRoster or they join the server, their in-game job is updated to match.
+
+### Supported Frameworks
+
+- **ESX** (`es_extended`)
+- **QBCore** (`qb-core`)
+- **QBox** (`qbx_core`)
+
+### Setup
+
+1. Enable job sync in `config.lua`:
+
+```lua
+Config.JobSync = {
+    enabled = true,
+    framework = 'esx',  -- 'esx', 'qbcore', or 'qbox'
+    syncOnJoin = true,
+    syncOnRankChange = true,
+}
+```
+
+2. Get your rank UUIDs from FiveRoster:
+   - Go to your roster on fiveroster.com
+   - Click **Edit** on a rank
+   - Click the **Copy Rank ID** button
+
+3. Add rank mappings:
+
+```lua
+Config.JobSync = {
+    enabled = true,
+    framework = 'esx',
+    syncOnJoin = true,
+    syncOnRankChange = true,
+
+    rankMappings = {
+        -- Police Department
+        ['abc123-def456-...'] = { job = 'police', grade = 0 },   -- Cadet
+        ['ghi789-jkl012-...'] = { job = 'police', grade = 1 },   -- Officer
+        ['mno345-pqr678-...'] = { job = 'police', grade = 2 },   -- Sergeant
+        ['stu901-vwx234-...'] = { job = 'police', grade = 3 },   -- Lieutenant
+
+        -- EMS (from different roster)
+        ['ems-rank-uuid-1'] = { job = 'ambulance', grade = 0 },  -- EMT
+        ['ems-rank-uuid-2'] = { job = 'ambulance', grade = 1 },  -- Paramedic
+    },
+
+    -- Optional: Set job for players not in any mapped rank
+    fallbackJob = { job = 'unemployed', grade = 0 },
+
+    -- Optional: Priority when player has multiple ranks
+    rosterPriority = {
+        'police-roster-uuid',   -- Police takes priority
+        'ems-roster-uuid',      -- Then EMS
+    }
+}
+```
+
+### How It Works
+
+1. **On Player Join**: When a player loads in, FiveRoster checks their ranks and sets their job accordingly
+2. **On Rank Change**: When a rank change is detected, the player's job is automatically updated
+3. **Priority System**: If a player has multiple ranks across rosters, the priority order determines which job they get
+
+### Manual Sync Command
+
+Admins can manually sync a player's job:
+
+```
+/syncjob [player_id]  -- From console
+/syncjob              -- For yourself (in-game)
+```
+
+### Job Sync Exports
+
+```lua
+-- Manually trigger job sync for a player
+exports['fiveroster']:SyncPlayerJob(source)
+
+-- Get job mapping for a specific rank UUID
+local mapping = exports['fiveroster']:GetJobForRank('rank-uuid-here')
+if mapping then
+    print('Job:', mapping.job, 'Grade:', mapping.grade)
+end
+```
+
+### Job Sync Events
+
+```lua
+-- Triggered when a player's job is synced
+AddEventHandler('fiveroster:onJobSynced', function(source, data)
+    print('Player job synced:', GetPlayerName(source))
+    print('Job:', data.job, 'Grade:', data.grade)
+    print('Rank:', data.rankName, 'Roster:', data.rosterName)
+end)
+```
 
 ## Developer API
 
