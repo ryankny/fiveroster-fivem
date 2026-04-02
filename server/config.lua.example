@@ -1,0 +1,37 @@
+--[[
+    ============================================================================
+    FiveRoster - Server Configuration
+    ============================================================================
+
+    IMPORTANT: This file contains your secret API key.
+    DO NOT share this file or commit it to version control!
+
+    SETUP INSTRUCTIONS:
+    1. Copy this file to 'config.lua' (remove the .example extension)
+    2. Replace 'YOUR_API_KEY_HERE' with your actual FiveRoster API key
+    3. Restart your FiveM server
+
+    HOW TO GET YOUR API KEY:
+    1. Log in to your FiveRoster dashboard at https://fiveroster.com
+    2. Navigate to Server Settings > API Keys
+    3. Click "Create API Key"
+    4. Give it a name (e.g., "FiveM Server")
+    5. Copy the generated key (starts with 'fr_')
+    6. Paste it below
+
+    SECURITY NOTICE:
+    - Your API key grants full access to your FiveRoster data
+    - Never share your API key publicly
+    - Add 'server/config.lua' to your .gitignore file
+    - Rotate your API key if you suspect it has been compromised
+
+    Documentation: https://docs.fiveroster.com/fivem
+    Support: https://discord.gg/FtZ57TGE64
+    ============================================================================
+]]
+
+ServerConfig = {}
+
+-- Your FiveRoster API Key
+-- Get this from: FiveRoster Dashboard > Server Settings > API Keys
+ServerConfig.APIKey = 'YOUR_API_KEY_HERE'

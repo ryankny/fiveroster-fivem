@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FiveRoster</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="container" class="hidden">
+        <div id="close-hint">
+            <button id="close-btn">✕ CLOSE</button>
+            <span>or press <kbd>ESC</kbd></span>
+        </div>
+
+        <div id="tablet">
+            <div class="tablet-frame">
+                <div class="tablet-bezel-top">
+                    <div class="tablet-camera"></div>
+                    <div class="tablet-speaker"></div>
+                </div>
+
+                <div class="tablet-screen">
+                    <div id="loading">
+                        <img src="https://fiveroster.com/assets/img/fiveroster_icon_colour.png" alt="FiveRoster" class="loading-logo">
+                        <div class="loader">
+                            <div class="loader-ring"></div>
+                            <div class="loader-ring"></div>
+                            <div class="loader-ring"></div>
+                        </div>
+                        <p class="loading-text">Loading<span class="loading-dots"></span></p>
+                    </div>
+
+                    <iframe id="fiveroster-frame" src="" frameborder="0" referrerpolicy="no-referrer-when-downgrade" allow="clipboard-write; clipboard-read"></iframe>
+                </div>
+
+                <div class="tablet-bezel-bottom">
+                    <div class="tablet-home-button"></div>
+                </div>
+
+                <div class="tablet-button-power"></div>
+                <div class="tablet-button-volume-up"></div>
+                <div class="tablet-button-volume-down"></div>
+            </div>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
