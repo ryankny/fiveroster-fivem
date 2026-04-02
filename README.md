@@ -9,6 +9,7 @@ Official FiveRoster integration for FiveM servers. Allows players to access rost
 - **In-Game Tablet UI** - Beautiful, immersive tablet interface with animations
 - **Shift Tracking** - Players can start and end shifts directly in-game
 - **Auto Shift End** - Automatically ends shifts when players disconnect
+- **Multi-Guild Support** - Connect multiple Discord servers (PD, EMS, Fire, etc.)
 - **Multi-Roster Support** - Access all enrolled rosters from one interface
 - **Document Viewer** - View server documents in-game
 - **Framework Support** - Works with ESX, QBCore, or standalone FiveM
@@ -37,20 +38,20 @@ resources/
     └── fxmanifest.lua
 ```
 
-### 2. Configure Your API Key
+### 2. Configure Your API Key(s)
 
 ```bash
 # Copy the example config
 cp server/config.lua.example server/config.lua
 
-# Edit server/config.lua and add your API key
+# Edit server/config.lua and add your API key(s)
 ```
 
 **Getting your API key:**
 1. Log in to [FiveRoster](https://fiveroster.com)
 2. Go to **Server Settings** > **API Keys**
 3. Click **Create API Key**
-4. Copy the key (starts with `fr_`)
+4. Copy the generated key
 5. Paste it into `server/config.lua`
 
 ### 3. Add to Server Config
@@ -89,12 +90,32 @@ Config.UseTablet = true
 
 ### Server Config (`server/config.lua`)
 
+#### Single Discord Server
+
+If you have one Discord server:
+
 ```lua
--- Your FiveRoster API Key (keep secret!)
-ServerConfig.APIKey = 'fr_YOUR_API_KEY_HERE'
+ServerConfig.APIKey = 'YOUR_API_KEY_HERE'
 ```
 
-> **Warning**: Never commit your API key to version control!
+#### Multiple Discord Servers
+
+If your FiveM server uses multiple Discord servers (e.g., separate servers for PD, EMS, Fire):
+
+```lua
+-- Primary API key
+ServerConfig.APIKey = 'YOUR_PD_API_KEY_HERE'
+
+-- Additional API keys for other Discord servers
+ServerConfig.APIKeys = {
+    'YOUR_EMS_API_KEY_HERE',
+    'YOUR_FIRE_API_KEY_HERE',
+}
+```
+
+Players will automatically see rosters from **all** Discord servers they are a member of, combined into a single view.
+
+> **Warning**: Never commit your API keys to version control!
 
 ## Commands
 
@@ -103,6 +124,32 @@ ServerConfig.APIKey = 'fr_YOUR_API_KEY_HERE'
 | `/rosters` | Opens the FiveRoster tablet |
 | `/roster` | Alias for /rosters |
 | `/fr` | Alias for /rosters |
+
+## Multi-Guild Setup
+
+Many FiveM communities use separate Discord servers for different departments:
+- Los Santos Police Department Discord
+- Los Santos EMS Discord
+- Los Santos Fire Department Discord
+
+FiveRoster supports this setup natively:
+
+1. Create an API key in each Discord server's FiveRoster dashboard
+2. Add all API keys to your `server/config.lua`:
+
+```lua
+ServerConfig.APIKey = 'pd_discord_api_key'
+
+ServerConfig.APIKeys = {
+    'ems_discord_api_key',
+    'fire_discord_api_key',
+}
+```
+
+3. When a player opens FiveRoster:
+   - The resource checks all configured Discord servers
+   - Shows rosters from every server the player is a member of
+   - Combines everything into one seamless interface
 
 ## Shift Management
 
@@ -394,9 +441,9 @@ end)
 
 ## Troubleshooting
 
-### "API key not configured"
+### "No API keys configured"
 
-Edit `server/config.lua` and add your FiveRoster API key.
+Edit `server/config.lua` and add your FiveRoster API key(s).
 
 ### "Discord not linked"
 
@@ -407,7 +454,7 @@ Players need to link their Discord to their FiveM account:
 
 ### "Not in guild"
 
-Players must be members of your Discord server to access FiveRoster.
+Players must be members of at least one of your configured Discord servers.
 
 ### "No rosters found"
 
