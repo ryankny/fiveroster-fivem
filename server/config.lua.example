@@ -3,12 +3,12 @@
     FiveRoster - Server Configuration
     ============================================================================
 
-    IMPORTANT: This file contains your secret API key.
+    IMPORTANT: This file contains your secret API key(s).
     DO NOT share this file or commit it to version control!
 
     SETUP INSTRUCTIONS:
     1. Copy this file to 'config.lua' (remove the .example extension)
-    2. Replace 'YOUR_API_KEY_HERE' with your actual FiveRoster API key
+    2. Add your FiveRoster API key(s) below
     3. Restart your FiveM server
 
     HOW TO GET YOUR API KEY:
@@ -16,14 +16,20 @@
     2. Navigate to Server Settings > API Keys
     3. Click "Create API Key"
     4. Give it a name (e.g., "FiveM Server")
-    5. Copy the generated key (starts with 'fr_')
+    5. Copy the generated key
     6. Paste it below
 
+    MULTIPLE DISCORD SERVERS:
+    If your FiveM server uses multiple Discord servers (e.g., separate servers
+    for PD, EMS, Fire), you can configure multiple API keys. Each API key is
+    tied to a specific Discord server. Players will see rosters from ALL
+    Discord servers they are a member of.
+
     SECURITY NOTICE:
-    - Your API key grants full access to your FiveRoster data
-    - Never share your API key publicly
+    - Your API key(s) grant full access to your FiveRoster data
+    - Never share your API keys publicly
     - Add 'server/config.lua' to your .gitignore file
-    - Rotate your API key if you suspect it has been compromised
+    - Rotate your API keys if you suspect they have been compromised
 
     Documentation: https://docs.fiveroster.com/fivem
     Support: https://discord.gg/FtZ57TGE64
@@ -32,6 +38,34 @@
 
 ServerConfig = {}
 
--- Your FiveRoster API Key
--- Get this from: FiveRoster Dashboard > Server Settings > API Keys
+--[[
+    ============================================================================
+    SINGLE DISCORD SERVER SETUP
+    ============================================================================
+    If you only have one Discord server, use this option.
+    Get your API key from: FiveRoster Dashboard > Server Settings > API Keys
+]]
 ServerConfig.APIKey = 'YOUR_API_KEY_HERE'
+
+--[[
+    ============================================================================
+    MULTIPLE DISCORD SERVERS SETUP (Optional)
+    ============================================================================
+    If your FiveM server uses multiple Discord servers (e.g., PD, EMS, Fire),
+    add all API keys here. Each key should be from a different Discord server.
+
+    Players will automatically see rosters from ALL Discord servers they
+    are a member of, combined into a single view.
+
+    Example:
+    ServerConfig.APIKeys = {
+        'api_key_for_pd_discord',
+        'api_key_for_ems_discord',
+        'api_key_for_fire_discord',
+    }
+]]
+ServerConfig.APIKeys = {
+    -- Add additional API keys here if you have multiple Discord servers
+    -- 'YOUR_SECOND_API_KEY_HERE',
+    -- 'YOUR_THIRD_API_KEY_HERE',
+}

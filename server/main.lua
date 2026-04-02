@@ -79,6 +79,48 @@ local function RedactString(str, showChars)
     return prefix .. '...' .. string.rep('*', 8) .. '...' .. suffix
 end
 
+-- Get all configured API keys (combines APIKey and APIKeys)
+local function GetAllApiKeys()
+    local keys = {}
+
+    -- Add primary API key
+    if ServerConfig.APIKey and ServerConfig.APIKey ~= 'YOUR_API_KEY_HERE' and ServerConfig.APIKey ~= '' then
+        table.insert(keys, ServerConfig.APIKey)
+    end
+
+    -- Add additional API keys from APIKeys array
+    if ServerConfig.APIKeys and type(ServerConfig.APIKeys) == 'table' then
+        for _, key in ipairs(ServerConfig.APIKeys) do
+            if key and key ~= 'YOUR_API_KEY_HERE' and key ~= '' then
+                -- Avoid duplicates
+                local isDuplicate = false
+                for _, existingKey in ipairs(keys) do
+                    if existingKey == key then
+                        isDuplicate = true
+                        break
+                    end
+                end
+                if not isDuplicate then
+                    table.insert(keys, key)
+                end
+            end
+        end
+    end
+
+    return keys
+end
+
+-- Check if multiple API keys are configured
+local function HasMultipleApiKeys()
+    return #GetAllApiKeys() > 1
+end
+
+-- Get the primary API key (first valid key)
+local function GetPrimaryApiKey()
+    local keys = GetAllApiKeys()
+    return keys[1]
+end
+
 -- Get player Discord ID from various sources
 local function GetPlayerDiscordId(source)
     DebugLog('discord', 'Retrieving Discord ID for player %s', GetPlayerName(source))
@@ -188,7 +230,7 @@ local function GetPlayerDiscordId(source)
     return nil
 end
 
--- Make HTTP request to FiveRoster API to create session
+-- Make HTTP request to FiveRoster API to create session (single guild)
 local function CreateFiveRosterSession(discordId, playerName, callback)
     local url = Config.FiveRosterURL .. '/api/v1/fivem/session'
 
@@ -237,7 +279,68 @@ local function CreateFiveRosterSession(discordId, playerName, callback)
         end
     end, 'POST', json.encode(requestBody), {
         ['Content-Type'] = 'application/json',
-        ['X-API-KEY'] = ServerConfig.APIKey,
+        ['X-API-KEY'] = GetPrimaryApiKey(),
+        ['Accept'] = 'application/json'
+    })
+end
+
+-- Make HTTP request to FiveRoster API to create multi-guild session
+local function CreateFiveRosterMultiSession(discordId, playerName, callback)
+    local url = Config.FiveRosterURL .. '/api/v1/fivem/session/multi'
+    local apiKeys = GetAllApiKeys()
+
+    local requestBody = {
+        discord_id = discordId,
+        player_name = playerName,
+        server_identifier = GetConvar('sv_hostname', 'Unknown Server')
+    }
+
+    DebugLog('api_request', 'POST %s (multi-guild, %d keys)', url, #apiKeys)
+    DebugLog('api_request', 'Discord ID: %s, Player: %s', RedactString(discordId, 6), playerName)
+
+    -- Create comma-separated API keys for header
+    local apiKeysHeader = table.concat(apiKeys, ',')
+
+    PerformHttpRequest(url, function(statusCode, response, headers)
+        DebugLog('api_response', 'Status: %s', tostring(statusCode))
+
+        if statusCode == 200 or statusCode == 201 then
+            local data = json.decode(response)
+
+            if data and data.success and data.embed_url then
+                DebugLog('api_response', 'Multi-guild session created successfully (%d guilds, %d rosters)',
+                    data.guild_count or 0, data.roster_count or 0)
+                callback(true, data.embed_url, data.roster_count or 0)
+            else
+                local errorMsg = data and data.error and data.error.message or 'Unknown error'
+                DebugLog('api_response', 'API Error: %s', errorMsg)
+
+                -- Handle specific error codes
+                if data and data.error then
+                    if data.error.code == 'not_in_any_guild' then
+                        callback(false, Config.Messages.not_in_guild)
+                    elseif data.error.code == 'no_rosters' then
+                        callback(false, Config.Messages.no_rosters)
+                    else
+                        callback(false, errorMsg)
+                    end
+                else
+                    callback(false, Config.Messages.session_error)
+                end
+            end
+        elseif statusCode == 401 then
+            DebugLog('api_response', 'API Key(s) invalid or expired')
+            callback(false, 'API authentication failed. Contact server administrator.')
+        elseif statusCode == 403 then
+            DebugLog('api_response', 'Access forbidden - player not in any configured guild')
+            callback(false, Config.Messages.not_in_guild)
+        else
+            DebugLog('api_response', 'HTTP Error: %s', tostring(statusCode))
+            callback(false, Config.Messages.session_error)
+        end
+    end, 'POST', json.encode(requestBody), {
+        ['Content-Type'] = 'application/json',
+        ['X-API-KEYS'] = apiKeysHeader,
         ['Accept'] = 'application/json'
     })
 end
@@ -249,12 +352,15 @@ RegisterNetEvent('fiveroster:requestSession', function()
 
     DebugLog('session', 'Session request from %s', playerName)
 
-    -- Check API key is configured
-    if not ServerConfig or not ServerConfig.APIKey or ServerConfig.APIKey == 'YOUR_API_KEY_HERE' then
-        DebugLog('session', 'API key not configured!')
+    -- Check API key(s) are configured
+    local apiKeys = GetAllApiKeys()
+    if #apiKeys == 0 then
+        DebugLog('session', 'No API keys configured!')
         TriggerClientEvent('fiveroster:sessionError', source, 'Server not configured. Contact administrator.')
         return
     end
+
+    DebugLog('session', 'Using %d API key(s)', #apiKeys)
 
     -- Get Discord ID
     local discordId = GetPlayerDiscordId(source)
@@ -265,8 +371,8 @@ RegisterNetEvent('fiveroster:requestSession', function()
         return
     end
 
-    -- Create session
-    CreateFiveRosterSession(discordId, playerName, function(success, result, rosterCount)
+    -- Create session (use multi-guild endpoint if multiple API keys configured)
+    local sessionCallback = function(success, result, rosterCount)
         if success then
             DebugLog('session', 'Session created for %s (%d rosters)', playerName, rosterCount)
             TriggerClientEvent('fiveroster:sessionCreated', source, result, rosterCount)
@@ -274,7 +380,13 @@ RegisterNetEvent('fiveroster:requestSession', function()
             DebugLog('session', 'Session failed for %s: %s', playerName, result)
             TriggerClientEvent('fiveroster:sessionError', source, result)
         end
-    end)
+    end
+
+    if HasMultipleApiKeys() then
+        CreateFiveRosterMultiSession(discordId, playerName, sessionCallback)
+    else
+        CreateFiveRosterSession(discordId, playerName, sessionCallback)
+    end
 end)
 
 -- Track active shifts for each player (keyed by source)
@@ -297,7 +409,7 @@ local function GetPlayerActiveShift(discordId, callback)
         end
     end, 'GET', '', {
         ['Content-Type'] = 'application/json',
-        ['X-API-KEY'] = ServerConfig.APIKey,
+        ['X-API-KEY'] = GetPrimaryApiKey(),
         ['Accept'] = 'application/json'
     })
 end
@@ -328,7 +440,7 @@ local function EndPlayerShift(discordId, shiftId, reason, callback)
         end
     end, 'POST', json.encode(requestBody), {
         ['Content-Type'] = 'application/json',
-        ['X-API-KEY'] = ServerConfig.APIKey,
+        ['X-API-KEY'] = GetPrimaryApiKey(),
         ['Accept'] = 'application/json'
     })
 end
@@ -462,7 +574,7 @@ exports('StartShift', function(source, rosterUuid, flagId, callback)
         end
     end, 'POST', json.encode(requestBody), {
         ['Content-Type'] = 'application/json',
-        ['X-API-KEY'] = ServerConfig.APIKey,
+        ['X-API-KEY'] = GetPrimaryApiKey(),
         ['Accept'] = 'application/json'
     })
 
@@ -538,7 +650,7 @@ exports('EndShift', function(source, callback)
         end
     end, 'POST', json.encode(requestBody), {
         ['Content-Type'] = 'application/json',
-        ['X-API-KEY'] = ServerConfig.APIKey,
+        ['X-API-KEY'] = GetPrimaryApiKey(),
         ['Accept'] = 'application/json'
     })
 
@@ -575,7 +687,7 @@ exports('GetPlayerRosters', function(source, callback)
         end
     end, 'GET', '', {
         ['Content-Type'] = 'application/json',
-        ['X-API-KEY'] = ServerConfig.APIKey,
+        ['X-API-KEY'] = GetPrimaryApiKey(),
         ['Accept'] = 'application/json'
     })
 
@@ -666,8 +778,13 @@ AddEventHandler('onResourceStart', function(resourceName)
     print('^3[FiveRoster]^7 Resource started')
     print('^3[FiveRoster]^7 Command: /' .. Config.CommandName)
 
-    if not ServerConfig or not ServerConfig.APIKey or ServerConfig.APIKey == 'YOUR_API_KEY_HERE' then
-        print('^1[FiveRoster] WARNING: API key not configured!^7')
+    local apiKeys = GetAllApiKeys()
+    if #apiKeys == 0 then
+        print('^1[FiveRoster] WARNING: No API keys configured!^7')
         print('^1[FiveRoster] Copy server/config.lua.example to server/config.lua and add your API key^7')
+    elseif #apiKeys == 1 then
+        print('^2[FiveRoster]^7 Configured with 1 API key (single Discord server)')
+    else
+        print('^2[FiveRoster]^7 Configured with ' .. #apiKeys .. ' API keys (multi-guild mode)')
     end
 end)
