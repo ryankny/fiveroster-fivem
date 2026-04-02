@@ -108,3 +108,76 @@ Config.Messages = {
     not_in_guild = 'You are not a member of this Discord server.',
     no_rosters = 'You are not enrolled in any rosters.'
 }
+
+--[[
+    ============================================================================
+    RANK-TO-JOB SYNCHRONIZATION
+    ============================================================================
+    Automatically sync FiveRoster ranks to in-game jobs/grades.
+    When a player's rank changes on FiveRoster, their in-game job will update.
+
+    Framework options:
+      'esx'    - Uses ESX job system (es_extended)
+      'qbcore' - Uses QBCore job system (qb-core)
+      'qbox'   - Uses QBox job system (qbx_core)
+      'none'   - Disabled (default)
+]]
+Config.JobSync = {
+    enabled = false,                  -- Set to true to enable rank-to-job sync
+    framework = 'none',               -- 'esx', 'qbcore', 'qbox', or 'none'
+    syncOnJoin = true,                -- Sync job when player joins the server
+    syncOnRankChange = true,          -- Sync job when rank changes (via webhook)
+
+    --[[
+        Rank-to-Job Mappings
+        Map FiveRoster rank UUIDs to in-game job/grade combinations.
+
+        Get rank UUIDs from FiveRoster:
+        1. Go to your roster on fiveroster.com
+        2. Click Edit on a rank
+        3. Click "Copy Rank ID" button
+
+        Format:
+        ['rank-uuid-here'] = {
+            job = 'police',           -- The job name in your framework
+            grade = 5,                -- The grade/rank number
+            label = 'Sergeant'        -- Optional: custom label (QBCore/QBox only)
+        }
+
+        Example for a Police Department roster:
+        ['abc123-def456-...'] = { job = 'police', grade = 0 },   -- Cadet
+        ['ghi789-jkl012-...'] = { job = 'police', grade = 1 },   -- Officer
+        ['mno345-pqr678-...'] = { job = 'police', grade = 2 },   -- Sergeant
+        ['stu901-vwx234-...'] = { job = 'police', grade = 3 },   -- Lieutenant
+        ['yza567-bcd890-...'] = { job = 'police', grade = 4 },   -- Captain
+        ['efg123-hij456-...'] = { job = 'police', grade = 5 },   -- Chief
+
+        You can also map ranks from different rosters to different jobs:
+        ['pd-rank-uuid'] = { job = 'police', grade = 2 },
+        ['ems-rank-uuid'] = { job = 'ambulance', grade = 3 },
+        ['fire-rank-uuid'] = { job = 'fire', grade = 1 },
+    ]]
+    rankMappings = {
+        -- Add your rank mappings here
+        -- ['your-rank-uuid'] = { job = 'police', grade = 0 },
+    },
+
+    --[[
+        Fallback Job (Optional)
+        If a player is not in any mapped rank, set them to this job.
+        Leave as nil to not change their job if no mapping is found.
+    ]]
+    fallbackJob = nil,               -- Example: { job = 'unemployed', grade = 0 }
+
+    --[[
+        Priority Order (Optional)
+        If a player has multiple ranks across rosters, which job takes priority?
+        List roster UUIDs in order of priority (first = highest priority).
+        If not specified, the first matching rank found will be used.
+    ]]
+    rosterPriority = {
+        -- 'pd-roster-uuid',         -- Police takes priority
+        -- 'ems-roster-uuid',        -- Then EMS
+        -- 'fire-roster-uuid',       -- Then Fire
+    }
+}

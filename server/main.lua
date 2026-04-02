@@ -771,6 +771,280 @@ RegisterNetEvent('fiveroster:endShiftExternal', function()
     end)
 end)
 
+-- ============================================================================
+-- RANK-TO-JOB SYNCHRONIZATION
+-- ============================================================================
+
+-- Framework objects (cached on first use)
+local ESX = nil
+local QBCore = nil
+local QBX = nil
+
+-- Initialize framework objects
+local function GetFrameworkObject()
+    if not Config.JobSync or not Config.JobSync.enabled then return nil end
+
+    local framework = Config.JobSync.framework
+
+    if framework == 'esx' then
+        if ESX then return ESX end
+        if GetResourceState('es_extended') == 'started' then
+            ESX = exports['es_extended']:getSharedObject()
+            return ESX
+        end
+    elseif framework == 'qbcore' then
+        if QBCore then return QBCore end
+        if GetResourceState('qb-core') == 'started' then
+            QBCore = exports['qb-core']:GetCoreObject()
+            return QBCore
+        end
+    elseif framework == 'qbox' then
+        if QBX then return QBX end
+        if GetResourceState('qbx_core') == 'started' then
+            QBX = exports['qbx_core']:GetCoreObject()
+            return QBX
+        end
+    end
+
+    return nil
+end
+
+-- Set a player's job based on framework
+local function SetPlayerJob(source, jobName, grade, label)
+    if not Config.JobSync or not Config.JobSync.enabled then return false end
+
+    local framework = Config.JobSync.framework
+    local fw = GetFrameworkObject()
+
+    if not fw then
+        DebugLog('job_sync', 'Framework %s not available', framework)
+        return false
+    end
+
+    if framework == 'esx' then
+        local xPlayer = fw.GetPlayerFromId(source)
+        if xPlayer then
+            xPlayer.setJob(jobName, grade)
+            DebugLog('job_sync', 'Set ESX job for player %s: %s grade %d', GetPlayerName(source), jobName, grade)
+            return true
+        end
+    elseif framework == 'qbcore' then
+        local Player = fw.Functions.GetPlayer(source)
+        if Player then
+            Player.Functions.SetJob(jobName, grade)
+            DebugLog('job_sync', 'Set QBCore job for player %s: %s grade %d', GetPlayerName(source), jobName, grade)
+            return true
+        end
+    elseif framework == 'qbox' then
+        local Player = fw.Functions.GetPlayer(source)
+        if Player then
+            Player.Functions.SetJob(jobName, grade)
+            DebugLog('job_sync', 'Set QBox job for player %s: %s grade %d', GetPlayerName(source), jobName, grade)
+            return true
+        end
+    end
+
+    return false
+end
+
+-- Get job mapping for a rank UUID
+local function GetJobForRank(rankUuid)
+    if not Config.JobSync or not Config.JobSync.rankMappings then return nil end
+    return Config.JobSync.rankMappings[rankUuid]
+end
+
+-- Find the best job mapping for a player based on their ranks
+local function FindBestJobMapping(ranks)
+    if not Config.JobSync or not Config.JobSync.enabled then return nil end
+    if not ranks or #ranks == 0 then return nil end
+
+    -- If roster priority is configured, sort ranks by priority
+    if Config.JobSync.rosterPriority and #Config.JobSync.rosterPriority > 0 then
+        local priorityMap = {}
+        for i, rosterUuid in ipairs(Config.JobSync.rosterPriority) do
+            priorityMap[rosterUuid] = i
+        end
+
+        table.sort(ranks, function(a, b)
+            local priorityA = priorityMap[a.roster_uuid] or 999
+            local priorityB = priorityMap[b.roster_uuid] or 999
+            return priorityA < priorityB
+        end)
+    end
+
+    -- Find first matching rank mapping
+    for _, rank in ipairs(ranks) do
+        local mapping = GetJobForRank(rank.rank_uuid)
+        if mapping then
+            return mapping, rank
+        end
+    end
+
+    return nil
+end
+
+-- Fetch player's ranks from FiveRoster API
+local function FetchPlayerRanks(discordId, callback)
+    local url = Config.FiveRosterURL .. '/api/v1/fivem/rosters?discord_id=' .. discordId .. '&include_ranks=true'
+
+    PerformHttpRequest(url, function(statusCode, response, headers)
+        if statusCode == 200 then
+            local data = json.decode(response)
+            if data and data.success and data.rosters then
+                local ranks = {}
+                for _, roster in ipairs(data.rosters) do
+                    if roster.player_rank then
+                        table.insert(ranks, {
+                            roster_uuid = roster.roster_uuid,
+                            roster_name = roster.name,
+                            rank_uuid = roster.player_rank.uuid,
+                            rank_name = roster.player_rank.name
+                        })
+                    end
+                end
+                callback(ranks)
+            else
+                callback({})
+            end
+        else
+            DebugLog('job_sync', 'Failed to fetch ranks: HTTP %s', tostring(statusCode))
+            callback({})
+        end
+    end, 'GET', '', {
+        ['Content-Type'] = 'application/json',
+        ['X-API-KEY'] = GetPrimaryApiKey(),
+        ['Accept'] = 'application/json'
+    })
+end
+
+-- Sync a player's job based on their FiveRoster ranks
+local function SyncPlayerJob(source)
+    if not Config.JobSync or not Config.JobSync.enabled then return end
+
+    local discordId = GetPlayerDiscordId(source)
+    if not discordId then
+        DebugLog('job_sync', 'Cannot sync job - no Discord ID for player %s', GetPlayerName(source))
+        return
+    end
+
+    DebugLog('job_sync', 'Syncing job for player %s', GetPlayerName(source))
+
+    FetchPlayerRanks(discordId, function(ranks)
+        local mapping, matchedRank = FindBestJobMapping(ranks)
+
+        if mapping then
+            local success = SetPlayerJob(source, mapping.job, mapping.grade, mapping.label)
+            if success then
+                DebugLog('job_sync', 'Synced player %s to job %s grade %d (rank: %s)',
+                    GetPlayerName(source), mapping.job, mapping.grade, matchedRank.rank_name)
+
+                -- Trigger event for other resources
+                TriggerEvent('fiveroster:onJobSynced', source, {
+                    job = mapping.job,
+                    grade = mapping.grade,
+                    rankUuid = matchedRank.rank_uuid,
+                    rankName = matchedRank.rank_name,
+                    rosterUuid = matchedRank.roster_uuid,
+                    rosterName = matchedRank.roster_name
+                })
+            end
+        elseif Config.JobSync.fallbackJob then
+            -- Apply fallback job if configured
+            local fallback = Config.JobSync.fallbackJob
+            SetPlayerJob(source, fallback.job, fallback.grade, fallback.label)
+            DebugLog('job_sync', 'Applied fallback job %s for player %s', fallback.job, GetPlayerName(source))
+        else
+            DebugLog('job_sync', 'No rank mapping found for player %s', GetPlayerName(source))
+        end
+    end)
+end
+
+-- Export for manually triggering job sync
+exports('SyncPlayerJob', function(source)
+    SyncPlayerJob(source)
+end)
+
+-- Export for getting job mapping for a rank
+exports('GetJobForRank', function(rankUuid)
+    return GetJobForRank(rankUuid)
+end)
+
+-- Sync job on player load (framework-specific)
+local function SetupJobSyncOnPlayerLoad()
+    if not Config.JobSync or not Config.JobSync.enabled or not Config.JobSync.syncOnJoin then return end
+
+    local framework = Config.JobSync.framework
+
+    if framework == 'esx' then
+        if GetResourceState('es_extended') == 'started' then
+            AddEventHandler('esx:playerLoaded', function(playerId, xPlayer)
+                Wait(2000) -- Wait for player to fully load
+                SyncPlayerJob(playerId)
+            end)
+            DebugLog('job_sync', 'Registered ESX playerLoaded handler')
+        end
+    elseif framework == 'qbcore' then
+        if GetResourceState('qb-core') == 'started' then
+            RegisterNetEvent('QBCore:Server:PlayerLoaded', function()
+                local source = source
+                Wait(2000)
+                SyncPlayerJob(source)
+            end)
+            DebugLog('job_sync', 'Registered QBCore PlayerLoaded handler')
+        end
+    elseif framework == 'qbox' then
+        if GetResourceState('qbx_core') == 'started' then
+            RegisterNetEvent('QBCore:Server:PlayerLoaded', function()
+                local source = source
+                Wait(2000)
+                SyncPlayerJob(source)
+            end)
+            DebugLog('job_sync', 'Registered QBox PlayerLoaded handler')
+        end
+    end
+end
+
+-- Handle rank change webhook from FiveRoster
+RegisterNetEvent('fiveroster:rankChanged', function(data)
+    if not Config.JobSync or not Config.JobSync.enabled or not Config.JobSync.syncOnRankChange then return end
+
+    local discordId = data.discord_id
+    if not discordId then return end
+
+    -- Find player by Discord ID
+    for _, playerId in ipairs(GetPlayers()) do
+        local playerDiscordId = GetPlayerDiscordId(playerId)
+        if playerDiscordId == discordId then
+            DebugLog('job_sync', 'Rank change detected for player %s, syncing job...', GetPlayerName(playerId))
+            SyncPlayerJob(playerId)
+            break
+        end
+    end
+end)
+
+-- Command to manually sync job (admin use)
+RegisterCommand('syncjob', function(source, args)
+    if source == 0 then
+        -- Console
+        if args[1] then
+            local targetId = tonumber(args[1])
+            if targetId then
+                SyncPlayerJob(targetId)
+                print('[FiveRoster] Synced job for player ' .. targetId)
+            end
+        else
+            print('Usage: syncjob [player_id]')
+        end
+    else
+        -- Player (could add permission check here)
+        SyncPlayerJob(source)
+    end
+end, false)
+
+-- ============================================================================
+-- RESOURCE LIFECYCLE
+-- ============================================================================
+
 -- Resource start message
 AddEventHandler('onResourceStart', function(resourceName)
     if GetCurrentResourceName() ~= resourceName then return end
@@ -786,5 +1060,11 @@ AddEventHandler('onResourceStart', function(resourceName)
         print('^2[FiveRoster]^7 Configured with 1 API key (single Discord server)')
     else
         print('^2[FiveRoster]^7 Configured with ' .. #apiKeys .. ' API keys (multi-guild mode)')
+    end
+
+    -- Setup job sync if enabled
+    if Config.JobSync and Config.JobSync.enabled then
+        print('^2[FiveRoster]^7 Job sync enabled (' .. Config.JobSync.framework .. ')')
+        SetupJobSyncOnPlayerLoad()
     end
 end)
