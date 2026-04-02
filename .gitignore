@@ -1,0 +1,25 @@
+# Server configuration (contains API key - DO NOT COMMIT)
+server/config.lua
+
+# IDE files
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*~
+
+# Build artifacts
+node_modules/
