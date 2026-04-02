@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.1.0] - 2025-04-02
 
 ### Added
+- **Multi-Guild Support** - Connect multiple Discord servers (PD, EMS, Fire, etc.)
+  - Configure multiple API keys in `server/config.lua`
+  - Players see rosters from all Discord servers they belong to
+  - Seamless aggregation into single interface
 - **Shift Management Exports** - Full API for integrating with MDTs and other resources
   - `StartShift(source, rosterUuid, flagId, callback)` - Start a shift via API
   - `EndShift(source, callback)` - End a player's active shift
