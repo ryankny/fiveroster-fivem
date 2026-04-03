@@ -9,6 +9,121 @@
     let expectedUrl = null;
     const baseUrl = 'https://fiveroster.com';
 
+    var navigationScript = '<script>' +
+        // ESC key handler
+        'document.addEventListener("keydown", function(e) {' +
+        '  if (e.key === "Escape" || e.keyCode === 27) {' +
+        '    e.preventDefault();' +
+        '    window.parent.postMessage({type: "fiveroster", action: "close"}, "*");' +
+        '  }' +
+        '});' +
+        // Intercept link clicks
+        'document.addEventListener("click", function(e) {' +
+        '  var target = e.target.closest("a");' +
+        '  if (target && target.href && !target.href.startsWith("javascript:")) {' +
+        '    e.preventDefault();' +
+        '    window.parent.postMessage({type: "fiveroster", action: "navigate", url: target.href}, "*");' +
+        '  }' +
+        '});' +
+        // Intercept form submissions
+        'document.addEventListener("submit", function(e) {' +
+        '  var form = e.target;' +
+        '  e.preventDefault();' +
+        '  var formData = new FormData(form);' +
+        '  var action = form.action || window.location.href;' +
+        '  var method = (form.method || "GET").toUpperCase();' +
+        '  window.parent.postMessage({' +
+        '    type: "fiveroster",' +
+        '    action: "formSubmit",' +
+        '    url: action,' +
+        '    method: method,' +
+        '    data: Object.fromEntries(formData)' +
+        '  }, "*");' +
+        '});' +
+        '<\/script>';
+
+    // Resolve a script src URL to an absolute URL
+    function resolveScriptUrl(src) {
+        if (src.startsWith('http://') || src.startsWith('https://')) {
+            return src;
+        }
+        if (src.startsWith('//')) {
+            return 'https:' + src;
+        }
+        if (src.startsWith('/')) {
+            return baseUrl + src;
+        }
+        return baseUrl + '/' + src;
+    }
+
+    // Fetch external scripts and inline them so they work in srcdoc
+    function inlineExternalScripts(html) {
+        var scriptRegex = /<script\s+([^>]*?)src\s*=\s*["']([^"']+)["']([^>]*?)>\s*<\/script>/gi;
+        var matches = [];
+        var match;
+
+        while ((match = scriptRegex.exec(html)) !== null) {
+            matches.push({
+                fullMatch: match[0],
+                attrs: (match[1] + ' ' + match[3]).trim(),
+                src: match[2]
+            });
+        }
+
+        if (matches.length === 0) {
+            return Promise.resolve(html);
+        }
+
+        var fetches = matches.map(function(m) {
+            var scriptUrl = resolveScriptUrl(m.src);
+            return fetch(scriptUrl)
+                .then(function(r) {
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    return r.text();
+                })
+                .then(function(text) {
+                    return { match: m, content: text };
+                })
+                .catch(function(err) {
+                    console.warn('FiveRoster: Failed to fetch script ' + m.src, err);
+                    return { match: m, content: '/* Failed to load: ' + m.src + ' */' };
+                });
+        });
+
+        return Promise.all(fetches).then(function(results) {
+            results.forEach(function(r) {
+                // Preserve non-src attributes (e.g. type, defer) but remove src-related ones
+                var attrs = r.match.attrs
+                    .replace(/\s*(async|defer)\s*/gi, ' ')
+                    .trim();
+                var tag = attrs ? '<script ' + attrs + '>' : '<script>';
+                html = html.replace(r.match.fullMatch, tag + r.content + '<\/script>');
+            });
+            return html;
+        });
+    }
+
+    // Inject base tag and navigation scripts into HTML
+    function prepareHtml(html) {
+        // Inject base tag for relative URLs
+        if (html.indexOf('<head>') !== -1) {
+            html = html.replace('<head>', '<head><base href="' + baseUrl + '/">');
+        } else if (html.indexOf('<HEAD>') !== -1) {
+            html = html.replace('<HEAD>', '<HEAD><base href="' + baseUrl + '/">');
+        }
+
+        // Inject navigation interceptor and ESC handler
+        if (html.indexOf('</body>') !== -1) {
+            html = html.replace('</body>', navigationScript + '</body>');
+        } else if (html.indexOf('</BODY>') !== -1) {
+            html = html.replace('</BODY>', navigationScript + '</BODY>');
+        } else {
+            html = html + navigationScript;
+        }
+
+        return html;
+    }
+
     // Fetch URL and inject into iframe via srcdoc
     function loadUrlIntoFrame(url) {
         fetch(url, {
@@ -21,55 +136,10 @@
                 return response.text();
             })
             .then(function(html) {
-                // Inject base tag for relative URLs
-                if (html.indexOf('<head>') !== -1) {
-                    html = html.replace('<head>', '<head><base href="' + baseUrl + '/">');
-                } else if (html.indexOf('<HEAD>') !== -1) {
-                    html = html.replace('<HEAD>', '<HEAD><base href="' + baseUrl + '/">');
-                }
-
-                // Inject navigation interceptor and ESC handler
-                var injectedScript = '<script>' +
-                    // ESC key handler
-                    'document.addEventListener("keydown", function(e) {' +
-                    '  if (e.key === "Escape" || e.keyCode === 27) {' +
-                    '    e.preventDefault();' +
-                    '    window.parent.postMessage({type: "fiveroster", action: "close"}, "*");' +
-                    '  }' +
-                    '});' +
-                    // Intercept link clicks
-                    'document.addEventListener("click", function(e) {' +
-                    '  var target = e.target.closest("a");' +
-                    '  if (target && target.href && !target.href.startsWith("javascript:")) {' +
-                    '    e.preventDefault();' +
-                    '    window.parent.postMessage({type: "fiveroster", action: "navigate", url: target.href}, "*");' +
-                    '  }' +
-                    '});' +
-                    // Intercept form submissions
-                    'document.addEventListener("submit", function(e) {' +
-                    '  var form = e.target;' +
-                    '  e.preventDefault();' +
-                    '  var formData = new FormData(form);' +
-                    '  var action = form.action || window.location.href;' +
-                    '  var method = (form.method || "GET").toUpperCase();' +
-                    '  window.parent.postMessage({' +
-                    '    type: "fiveroster",' +
-                    '    action: "formSubmit",' +
-                    '    url: action,' +
-                    '    method: method,' +
-                    '    data: Object.fromEntries(formData)' +
-                    '  }, "*");' +
-                    '});' +
-                    '<\/script>';
-
-                if (html.indexOf('</body>') !== -1) {
-                    html = html.replace('</body>', injectedScript + '</body>');
-                } else if (html.indexOf('</BODY>') !== -1) {
-                    html = html.replace('</BODY>', injectedScript + '</BODY>');
-                } else {
-                    html = html + injectedScript;
-                }
-
+                html = prepareHtml(html);
+                return inlineExternalScripts(html);
+            })
+            .then(function(html) {
                 frame.srcdoc = html;
             })
             .catch(function(err) {
@@ -257,52 +327,10 @@
                                 return response.text();
                             })
                             .then(function(html) {
-                                // Inject base tag
-                                if (html.indexOf('<head>') !== -1) {
-                                    html = html.replace('<head>', '<head><base href="' + baseUrl + '/">');
-                                } else if (html.indexOf('<HEAD>') !== -1) {
-                                    html = html.replace('<HEAD>', '<HEAD><base href="' + baseUrl + '/">');
-                                }
-
-                                // Inject scripts
-                                var injectedScript = '<script>' +
-                                    'document.addEventListener("keydown", function(e) {' +
-                                    '  if (e.key === "Escape" || e.keyCode === 27) {' +
-                                    '    e.preventDefault();' +
-                                    '    window.parent.postMessage({type: "fiveroster", action: "close"}, "*");' +
-                                    '  }' +
-                                    '});' +
-                                    'document.addEventListener("click", function(e) {' +
-                                    '  var target = e.target.closest("a");' +
-                                    '  if (target && target.href && !target.href.startsWith("javascript:")) {' +
-                                    '    e.preventDefault();' +
-                                    '    window.parent.postMessage({type: "fiveroster", action: "navigate", url: target.href}, "*");' +
-                                    '  }' +
-                                    '});' +
-                                    'document.addEventListener("submit", function(e) {' +
-                                    '  var form = e.target;' +
-                                    '  e.preventDefault();' +
-                                    '  var formData = new FormData(form);' +
-                                    '  var action = form.action || window.location.href;' +
-                                    '  var method = (form.method || "GET").toUpperCase();' +
-                                    '  window.parent.postMessage({' +
-                                    '    type: "fiveroster",' +
-                                    '    action: "formSubmit",' +
-                                    '    url: action,' +
-                                    '    method: method,' +
-                                    '    data: Object.fromEntries(formData)' +
-                                    '  }, "*");' +
-                                    '});' +
-                                    '<\/script>';
-
-                                if (html.indexOf('</body>') !== -1) {
-                                    html = html.replace('</body>', injectedScript + '</body>');
-                                } else if (html.indexOf('</BODY>') !== -1) {
-                                    html = html.replace('</BODY>', injectedScript + '</BODY>');
-                                } else {
-                                    html = html + injectedScript;
-                                }
-
+                                html = prepareHtml(html);
+                                return inlineExternalScripts(html);
+                            })
+                            .then(function(html) {
                                 frame.srcdoc = html;
                                 loading.classList.add('hidden');
                             })
