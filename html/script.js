@@ -82,6 +82,8 @@
                     return r.text();
                 })
                 .then(function(text) {
+                    // Escape </script> in fetched content so it doesn't break the inline tag
+                    text = text.replace(/<\/script>/gi, '<\\/script>');
                     return { match: m, content: text };
                 })
                 .catch(function(err) {
