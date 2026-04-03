@@ -6,72 +6,10 @@
 
     let isOpen = false;
     let loadTimeout = null;
-    let currentBlobUrl = null;
+    let expectedUrl = null;
     const baseUrl = 'https://fiveroster.com';
 
-    var navigationScript = '<script>' +
-        // ESC key handler
-        'document.addEventListener("keydown", function(e) {' +
-        '  if (e.key === "Escape" || e.keyCode === 27) {' +
-        '    e.preventDefault();' +
-        '    window.parent.postMessage({type: "fiveroster", action: "close"}, "*");' +
-        '  }' +
-        '});' +
-        // Intercept link clicks
-        'document.addEventListener("click", function(e) {' +
-        '  var target = e.target.closest("a");' +
-        '  if (target && target.href && !target.href.startsWith("javascript:")) {' +
-        '    e.preventDefault();' +
-        '    window.parent.postMessage({type: "fiveroster", action: "navigate", url: target.href}, "*");' +
-        '  }' +
-        '});' +
-        // Intercept form submissions
-        'document.addEventListener("submit", function(e) {' +
-        '  var form = e.target;' +
-        '  e.preventDefault();' +
-        '  var formData = new FormData(form);' +
-        '  var action = form.action || window.location.href;' +
-        '  var method = (form.method || "GET").toUpperCase();' +
-        '  window.parent.postMessage({' +
-        '    type: "fiveroster",' +
-        '    action: "formSubmit",' +
-        '    url: action,' +
-        '    method: method,' +
-        '    data: Object.fromEntries(formData)' +
-        '  }, "*");' +
-        '});' +
-        '<\/script>';
-
-    // Inject base tag and navigation scripts into HTML
-    function prepareHtml(html) {
-        // Inject base tag for relative URLs
-        if (html.indexOf('<head>') !== -1) {
-            html = html.replace('<head>', '<head><base href="' + baseUrl + '/">');
-        } else if (html.indexOf('<HEAD>') !== -1) {
-            html = html.replace('<HEAD>', '<HEAD><base href="' + baseUrl + '/">');
-        }
-
-        // Inject navigation interceptor and ESC handler
-        if (html.indexOf('</body>') !== -1) {
-            html = html.replace('</body>', navigationScript + '</body>');
-        } else if (html.indexOf('</BODY>') !== -1) {
-            html = html.replace('</BODY>', navigationScript + '</BODY>');
-        } else {
-            html = html + navigationScript;
-        }
-
-        return html;
-    }
-
-    // Revoke the previous blob URL to free memory
-    function revokeCurrentBlob() {
-        if (currentBlobUrl) {
-            URL.revokeObjectURL(currentBlobUrl);
-            currentBlobUrl = null;
-        }
-    }
-
-    // Fetch URL, prepare HTML, and load via Blob URL
+    // Fetch URL and inject into iframe via srcdoc
     function loadUrlIntoFrame(url) {
         fetch(url, {
             credentials: 'include'
@@ -83,12 +21,56 @@
                 return response.text();
             })
             .then(function(html) {
-                html = prepareHtml(html);
+                // Inject base tag for relative URLs
+                if (html.indexOf('<head>') !== -1) {
+                    html = html.replace('<head>', '<head><base href="' + baseUrl + '/">');
+                } else if (html.indexOf('<HEAD>') !== -1) {
+                    html = html.replace('<HEAD>', '<HEAD><base href="' + baseUrl + '/">');
+                }
 
-                revokeCurrentBlob();
-                var blob = new Blob([html], { type: 'text/html' });
-                currentBlobUrl = URL.createObjectURL(blob);
-                frame.src = currentBlobUrl;
+                // Inject navigation interceptor and ESC handler
+                var injectedScript = '<script>' +
+                    // ESC key handler
+                    'document.addEventListener("keydown", function(e) {' +
+                    '  if (e.key === "Escape" || e.keyCode === 27) {' +
+                    '    e.preventDefault();' +
+                    '    window.parent.postMessage({type: "fiveroster", action: "close"}, "*");' +
+                    '  }' +
+                    '});' +
+                    // Intercept link clicks
+                    'document.addEventListener("click", function(e) {' +
+                    '  var target = e.target.closest("a");' +
+                    '  if (target && target.href && !target.href.startsWith("javascript:")) {' +
+                    '    e.preventDefault();' +
+                    '    window.parent.postMessage({type: "fiveroster", action: "navigate", url: target.href}, "*");' +
+                    '  }' +
+                    '});' +
+                    // Intercept form submissions
+                    'document.addEventListener("submit", function(e) {' +
+                    '  var form = e.target;' +
+                    '  e.preventDefault();' +
+                    '  var formData = new FormData(form);' +
+                    '  var action = form.action || window.location.href;' +
+                    '  var method = (form.method || "GET").toUpperCase();' +
+                    '  window.parent.postMessage({' +
+                    '    type: "fiveroster",' +
+                    '    action: "formSubmit",' +
+                    '    url: action,' +
+                    '    method: method,' +
+                    '    data: Object.fromEntries(formData)' +
+                    '  }, "*");' +
+                    '});' +
+                    '<\/script>';
+
+                if (html.indexOf('</body>') !== -1) {
+                    html = html.replace('</body>', injectedScript + '</body>');
+                } else if (html.indexOf('</BODY>') !== -1) {
+                    html = html.replace('</BODY>', injectedScript + '</BODY>');
+                } else {
+                    html = html + injectedScript;
+                }
+
+                frame.srcdoc = html;
             })
             .catch(function(err) {
                 console.error('FiveRoster: Failed to load page', err);
@@ -103,6 +85,7 @@
     // Close the NUI
     function closeFrame() {
         isOpen = false;
+        expectedUrl = null;
 
         if (loadTimeout) {
             clearTimeout(loadTimeout);
@@ -110,7 +93,7 @@
         }
 
         container.classList.add('hidden');
-        revokeCurrentBlob();
+        frame.srcdoc = '';
         frame.src = 'about:blank';
         frame.classList.remove('loaded');
         loading.classList.remove('hidden');
@@ -161,6 +144,7 @@
     function openFrame(url) {
         if (isOpen) return;
         isOpen = true;
+        expectedUrl = url;
 
         // Show loading initially
         loading.classList.remove('hidden');
@@ -182,7 +166,7 @@
 
     // Handle iframe load
     frame.addEventListener('load', function() {
-        if (isOpen && frame.src !== 'about:blank') {
+        if (expectedUrl && frame.srcdoc) {
             if (loadTimeout) {
                 clearTimeout(loadTimeout);
                 loadTimeout = null;
@@ -273,12 +257,53 @@
                                 return response.text();
                             })
                             .then(function(html) {
-                                html = prepareHtml(html);
+                                // Inject base tag
+                                if (html.indexOf('<head>') !== -1) {
+                                    html = html.replace('<head>', '<head><base href="' + baseUrl + '/">');
+                                } else if (html.indexOf('<HEAD>') !== -1) {
+                                    html = html.replace('<HEAD>', '<HEAD><base href="' + baseUrl + '/">');
+                                }
 
-                                revokeCurrentBlob();
-                                var blob = new Blob([html], { type: 'text/html' });
-                                currentBlobUrl = URL.createObjectURL(blob);
-                                frame.src = currentBlobUrl;
+                                // Inject scripts
+                                var injectedScript = '<script>' +
+                                    'document.addEventListener("keydown", function(e) {' +
+                                    '  if (e.key === "Escape" || e.keyCode === 27) {' +
+                                    '    e.preventDefault();' +
+                                    '    window.parent.postMessage({type: "fiveroster", action: "close"}, "*");' +
+                                    '  }' +
+                                    '});' +
+                                    'document.addEventListener("click", function(e) {' +
+                                    '  var target = e.target.closest("a");' +
+                                    '  if (target && target.href && !target.href.startsWith("javascript:")) {' +
+                                    '    e.preventDefault();' +
+                                    '    window.parent.postMessage({type: "fiveroster", action: "navigate", url: target.href}, "*");' +
+                                    '  }' +
+                                    '});' +
+                                    'document.addEventListener("submit", function(e) {' +
+                                    '  var form = e.target;' +
+                                    '  e.preventDefault();' +
+                                    '  var formData = new FormData(form);' +
+                                    '  var action = form.action || window.location.href;' +
+                                    '  var method = (form.method || "GET").toUpperCase();' +
+                                    '  window.parent.postMessage({' +
+                                    '    type: "fiveroster",' +
+                                    '    action: "formSubmit",' +
+                                    '    url: action,' +
+                                    '    method: method,' +
+                                    '    data: Object.fromEntries(formData)' +
+                                    '  }, "*");' +
+                                    '});' +
+                                    '<\/script>';
+
+                                if (html.indexOf('</body>') !== -1) {
+                                    html = html.replace('</body>', injectedScript + '</body>');
+                                } else if (html.indexOf('</BODY>') !== -1) {
+                                    html = html.replace('</BODY>', injectedScript + '</BODY>');
+                                } else {
+                                    html = html + injectedScript;
+                                }
+
+                                frame.srcdoc = html;
                                 loading.classList.add('hidden');
                             })
                             .catch(function(err) {
