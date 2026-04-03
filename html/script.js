@@ -6,6 +6,99 @@
 
     let isOpen = false;
     let loadTimeout = null;
+    let currentBlobUrl = null;
+    const baseUrl = 'https://fiveroster.com';
+
+    var navigationScript = '<script>' +
+        // ESC key handler
+        'document.addEventListener("keydown", function(e) {' +
+        '  if (e.key === "Escape" || e.keyCode === 27) {' +
+        '    e.preventDefault();' +
+        '    window.parent.postMessage({type: "fiveroster", action: "close"}, "*");' +
+        '  }' +
+        '});' +
+        // Intercept link clicks
+        'document.addEventListener("click", function(e) {' +
+        '  var target = e.target.closest("a");' +
+        '  if (target && target.href && !target.href.startsWith("javascript:")) {' +
+        '    e.preventDefault();' +
+        '    window.parent.postMessage({type: "fiveroster", action: "navigate", url: target.href}, "*");' +
+        '  }' +
+        '});' +
+        // Intercept form submissions
+        'document.addEventListener("submit", function(e) {' +
+        '  var form = e.target;' +
+        '  e.preventDefault();' +
+        '  var formData = new FormData(form);' +
+        '  var action = form.action || window.location.href;' +
+        '  var method = (form.method || "GET").toUpperCase();' +
+        '  window.parent.postMessage({' +
+        '    type: "fiveroster",' +
+        '    action: "formSubmit",' +
+        '    url: action,' +
+        '    method: method,' +
+        '    data: Object.fromEntries(formData)' +
+        '  }, "*");' +
+        '});' +
+        '<\/script>';
+
+    // Inject base tag and navigation scripts into HTML
+    function prepareHtml(html) {
+        // Inject base tag for relative URLs
+        if (html.indexOf('<head>') !== -1) {
+            html = html.replace('<head>', '<head><base href="' + baseUrl + '/">');
+        } else if (html.indexOf('<HEAD>') !== -1) {
+            html = html.replace('<HEAD>', '<HEAD><base href="' + baseUrl + '/">');
+        }
+
+        // Inject navigation interceptor and ESC handler
+        if (html.indexOf('</body>') !== -1) {
+            html = html.replace('</body>', navigationScript + '</body>');
+        } else if (html.indexOf('</BODY>') !== -1) {
+            html = html.replace('</BODY>', navigationScript + '</BODY>');
+        } else {
+            html = html + navigationScript;
+        }
+
+        return html;
+    }
+
+    // Revoke the previous blob URL to free memory
+    function revokeCurrentBlob() {
+        if (currentBlobUrl) {
+            URL.revokeObjectURL(currentBlobUrl);
+            currentBlobUrl = null;
+        }
+    }
+
+    // Fetch URL, prepare HTML, and load via Blob URL
+    function loadUrlIntoFrame(url) {
+        fetch(url, {
+            credentials: 'include'
+        })
+            .then(function(response) {
+                if (!response.ok) {
+                    throw new Error('HTTP ' + response.status);
+                }
+                return response.text();
+            })
+            .then(function(html) {
+                html = prepareHtml(html);
+
+                revokeCurrentBlob();
+                var blob = new Blob([html], { type: 'text/html' });
+                currentBlobUrl = URL.createObjectURL(blob);
+                frame.src = currentBlobUrl;
+            })
+            .catch(function(err) {
+                console.error('FiveRoster: Failed to load page', err);
+                fetch('https://fiveroster-fivem/error', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                }).catch(function() {});
+            });
+    }
 
     // Close the NUI
     function closeFrame() {
@@ -17,6 +110,7 @@
         }
 
         container.classList.add('hidden');
+        revokeCurrentBlob();
         frame.src = 'about:blank';
         frame.classList.remove('loaded');
         loading.classList.remove('hidden');
@@ -75,9 +169,8 @@
 
         container.classList.remove('hidden');
 
-        // Load the embed URL directly in the iframe
         setTimeout(function() {
-            frame.src = url;
+            loadUrlIntoFrame(url);
         }, 100);
 
         // Timeout to hide loading after 10 seconds regardless
@@ -125,17 +218,80 @@
                 }
             }, true);
         } catch (e) {
-            // Cross-origin restriction - ESC handled at window level
+            // Cross-origin restriction - handled by injected script
         }
     });
 
-    // Listen for close messages from iframe (if FiveRoster sends them)
+    // Listen for messages from iframe
     window.addEventListener('message', function(event) {
         if (event.data && event.data.type === 'fiveroster') {
             switch (event.data.action) {
                 case 'close':
                 case 'submitted':
                     requestClose();
+                    break;
+
+                case 'navigate':
+                    // Handle link clicks - fetch and inject new page
+                    if (event.data.url) {
+                        loading.classList.remove('hidden');
+                        loadUrlIntoFrame(event.data.url);
+                    }
+                    break;
+
+                case 'formSubmit':
+                    // Handle form submissions
+                    if (event.data.url) {
+                        var url = event.data.url;
+                        var method = event.data.method || 'GET';
+                        var data = event.data.data || {};
+
+                        loading.classList.remove('hidden');
+
+                        if (method === 'GET') {
+                            // Append data as query params
+                            var params = new URLSearchParams(data).toString();
+                            if (params) {
+                                url += (url.indexOf('?') === -1 ? '?' : '&') + params;
+                            }
+                            loadUrlIntoFrame(url);
+                        } else {
+                            // POST request
+                            fetch(url, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/x-www-form-urlencoded',
+                                },
+                                body: new URLSearchParams(data).toString(),
+                                credentials: 'include'
+                            })
+                            .then(function(response) {
+                                // Check if redirected
+                                if (response.redirected) {
+                                    return fetch(response.url, { credentials: 'include' }).then(function(r) { return r.text(); });
+                                }
+                                return response.text();
+                            })
+                            .then(function(html) {
+                                html = prepareHtml(html);
+
+                                revokeCurrentBlob();
+                                var blob = new Blob([html], { type: 'text/html' });
+                                currentBlobUrl = URL.createObjectURL(blob);
+                                frame.src = currentBlobUrl;
+                                loading.classList.add('hidden');
+                            })
+                            .catch(function(err) {
+                                console.error('FiveRoster: Form submission failed', err);
+                                loading.classList.add('hidden');
+                                fetch('https://fiveroster-fivem/error', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({})
+                                }).catch(function() {});
+                            });
+                        }
+                    }
                     break;
             }
         }
