@@ -137,12 +137,13 @@ end
 
 -- Close NUI
 local function CloseNUI()
+    -- Always release focus even if state is out of sync
+    SetNuiFocus(false, false)
+    SetNuiFocusKeepInput(false)
+
     if not isNUIOpen then return end
 
     isNUIOpen = false
-
-    SetNuiFocus(false, false)
-    SetNuiFocusKeepInput(false)
 
     RemoveTablet()
 
@@ -180,6 +181,7 @@ end)
 RegisterNUICallback('error', function(data, cb)
     DebugLog('nui', 'NUI error occurred')
     Notify(Config.Messages.error, 'error')
+    CloseNUI()
     cb('ok')
 end)
 
@@ -356,6 +358,11 @@ for _, alias in ipairs(Config.CommandAliases or {}) do
         OpenFiveRoster()
     end, false)
 end
+
+-- Backup close command in case NUI gets stuck
+RegisterCommand('closeroster', function()
+    CloseNUI()
+end, false)
 
 -- Keybinding registration (optional)
 RegisterKeyMapping(Config.CommandName, 'Open FiveRoster', 'keyboard', '')
