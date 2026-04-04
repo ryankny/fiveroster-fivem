@@ -101,19 +101,14 @@
 
     // Request close from client
     function requestClose() {
-        closeFrame();
-
-        fetch('https://fiveroster-fivem/closeEsc', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({})
-        }).catch(function() {});
-
+        // Send close callback to Lua BEFORE clearing the frame
         fetch('https://fiveroster-fivem/close', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({})
         }).catch(function() {});
+
+        closeFrame();
     }
 
     // Close button handler
@@ -319,6 +314,13 @@
                     }
                     break;
             }
+        }
+    });
+
+    // Click outside the tablet to close
+    container.addEventListener('click', function(e) {
+        if (e.target === container && isOpen) {
+            requestClose();
         }
     });
 
