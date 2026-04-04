@@ -12,7 +12,7 @@
     // Fetch URL and inject into iframe via srcdoc
     function loadUrlIntoFrame(url) {
         fetch(url, {
-            credentials: 'include'
+            referrerPolicy: 'no-referrer'
         })
             .then(function(response) {
                 if (!response.ok) {
@@ -242,12 +242,12 @@
                                     'Content-Type': 'application/x-www-form-urlencoded',
                                 },
                                 body: new URLSearchParams(data).toString(),
-                                credentials: 'include'
+                                referrerPolicy: 'no-referrer'
                             })
                             .then(function(response) {
                                 // Check if redirected
                                 if (response.redirected) {
-                                    return fetch(response.url, { credentials: 'include' }).then(function(r) { return r.text(); });
+                                    return fetch(response.url, { referrerPolicy: 'no-referrer' }).then(function(r) { return r.text(); });
                                 }
                                 return response.text();
                             })
