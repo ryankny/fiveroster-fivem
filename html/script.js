@@ -5,6 +5,7 @@
     const closeBtn = document.getElementById('close-btn');
 
     let isOpen = false;
+    let isClosing = false;
     let loadTimeout = null;
     let expectedUrl = null;
     const baseUrl = 'https://fiveroster.com';
@@ -85,6 +86,7 @@
     // Close the NUI
     function closeFrame() {
         isOpen = false;
+        isClosing = false;
         expectedUrl = null;
 
         if (loadTimeout) {
@@ -101,14 +103,26 @@
 
     // Request close from client
     function requestClose() {
-        // Send close callback to Lua BEFORE clearing the frame
+        if (!isOpen || isClosing) return;
+        isClosing = true;
+
+        // Send close callback to Lua - don't clear frame yet
+        // Lua will send 'close' action back after releasing focus
         fetch('https://fiveroster-fivem/close', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({})
-        }).catch(function() {});
+        }).catch(function() {
+            // If callback fails, force close locally
+            closeFrame();
+        });
 
-        closeFrame();
+        // Safety timeout - force close if Lua doesn't respond in 500ms
+        setTimeout(function() {
+            if (isClosing && isOpen) {
+                closeFrame();
+            }
+        }, 500);
     }
 
     // Close button handler
@@ -139,6 +153,7 @@
     function openFrame(url) {
         if (isOpen) return;
         isOpen = true;
+        isClosing = false;
         expectedUrl = url;
 
         // Show loading initially
