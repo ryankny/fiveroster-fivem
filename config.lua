@@ -128,6 +128,13 @@ Config.JobSync = {
     syncOnJoin = true,                -- Sync job when player joins the server
     syncOnRankChange = true,          -- Sync job when rank changes (via webhook)
 
+    -- Multi-character frameworks (ESX/QBCore/QBox) fire their PlayerLoaded event
+    -- every time a character is selected, including character switches. Leaving this
+    -- at false restricts Discord role sync to the first character loaded in a session
+    -- so switching characters does not apply the synced job to every character.
+    -- Set to true to sync on every character load.
+    syncOnCharacterSwitch = false,
+
     --[[
         Rank-to-Job Mappings
         Map FiveRoster rank UUIDs to in-game job/grade combinations.
