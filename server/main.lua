@@ -271,8 +271,16 @@ local function CreateFiveRosterSession(discordId, playerName, callback)
             DebugLog('api_response', 'API Key invalid or expired')
             callback(false, 'API authentication failed. Contact server administrator.')
         elseif statusCode == 403 then
-            DebugLog('api_response', 'Access forbidden - player may not be in guild')
-            callback(false, Config.Messages.not_in_guild)
+            local ok, parsed = pcall(json.decode, response or '')
+            if not ok then parsed = nil end
+            local errCode = parsed and parsed.error and parsed.error.code or nil
+            local errMsg = parsed and parsed.error and parsed.error.message or nil
+            DebugLog('api_response', 'HTTP 403 (code=%s, message=%s)', tostring(errCode), tostring(errMsg))
+            if errCode == 'not_in_guild' then
+                callback(false, Config.Messages.not_in_guild)
+            else
+                callback(false, errMsg or Config.Messages.session_error)
+            end
         else
             DebugLog('api_response', 'HTTP Error: %s', tostring(statusCode))
             callback(false, Config.Messages.session_error)
@@ -332,8 +340,18 @@ local function CreateFiveRosterMultiSession(discordId, playerName, callback)
             DebugLog('api_response', 'API Key(s) invalid or expired')
             callback(false, 'API authentication failed. Contact server administrator.')
         elseif statusCode == 403 then
-            DebugLog('api_response', 'Access forbidden - player not in any configured guild')
-            callback(false, Config.Messages.not_in_guild)
+            local ok, parsed = pcall(json.decode, response or '')
+            if not ok then parsed = nil end
+            local errCode = parsed and parsed.error and parsed.error.code or nil
+            local errMsg = parsed and parsed.error and parsed.error.message or nil
+            DebugLog('api_response', 'HTTP 403 (code=%s, message=%s)', tostring(errCode), tostring(errMsg))
+            if errCode == 'not_in_any_guild' then
+                callback(false, Config.Messages.not_in_guild)
+            elseif errCode == 'no_rosters' then
+                callback(false, Config.Messages.no_rosters)
+            else
+                callback(false, errMsg or Config.Messages.session_error)
+            end
         else
             DebugLog('api_response', 'HTTP Error: %s', tostring(statusCode))
             callback(false, Config.Messages.session_error)
@@ -969,6 +987,29 @@ exports('GetJobForRank', function(rankUuid)
     return GetJobForRank(rankUuid)
 end)
 
+-- Track sources already synced this session to avoid re-syncing on character switches.
+-- Multi-character frameworks fire their PlayerLoaded event every time a character is
+-- loaded, which previously caused the Discord-derived job to be applied to every
+-- character the player swapped to. Keyed by FiveM source, cleared on disconnect.
+local jobSyncedSources = {}
+
+local function TrySyncOnPlayerLoad(playerId)
+    local syncOnSwitch = Config.JobSync.syncOnCharacterSwitch
+    if syncOnSwitch == nil then syncOnSwitch = false end
+
+    if not syncOnSwitch and jobSyncedSources[playerId] then
+        DebugLog('job_sync', 'Skipping job sync for %s - already synced this session (character switch)', GetPlayerName(playerId))
+        return
+    end
+
+    jobSyncedSources[playerId] = true
+    SyncPlayerJob(playerId)
+end
+
+AddEventHandler('playerDropped', function()
+    jobSyncedSources[source] = nil
+end)
+
 -- Sync job on player load (framework-specific)
 local function SetupJobSyncOnPlayerLoad()
     if not Config.JobSync or not Config.JobSync.enabled or not Config.JobSync.syncOnJoin then return end
@@ -979,25 +1020,25 @@ local function SetupJobSyncOnPlayerLoad()
         if GetResourceState('es_extended') == 'started' then
             AddEventHandler('esx:playerLoaded', function(playerId, xPlayer)
                 Wait(2000) -- Wait for player to fully load
-                SyncPlayerJob(playerId)
+                TrySyncOnPlayerLoad(playerId)
             end)
             DebugLog('job_sync', 'Registered ESX playerLoaded handler')
         end
     elseif framework == 'qbcore' then
         if GetResourceState('qb-core') == 'started' then
             RegisterNetEvent('QBCore:Server:PlayerLoaded', function()
-                local source = source
+                local src = source
                 Wait(2000)
-                SyncPlayerJob(source)
+                TrySyncOnPlayerLoad(src)
             end)
             DebugLog('job_sync', 'Registered QBCore PlayerLoaded handler')
         end
     elseif framework == 'qbox' then
         if GetResourceState('qbx_core') == 'started' then
             RegisterNetEvent('QBCore:Server:PlayerLoaded', function()
-                local source = source
+                local src = source
                 Wait(2000)
-                SyncPlayerJob(source)
+                TrySyncOnPlayerLoad(src)
             end)
             DebugLog('job_sync', 'Registered QBox PlayerLoaded handler')
         end
