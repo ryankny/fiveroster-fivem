@@ -135,11 +135,11 @@ local function OpenNUI(embedUrl)
     DebugLog('nui', 'Opened NUI with URL: %s', embedUrl)
 end
 
--- Close NUI
+-- Close NUI (idempotent; always releases focus even when state is out of sync)
 local function CloseNUI()
-    -- Always release focus even if state is out of sync
     SetNuiFocus(false, false)
     SetNuiFocusKeepInput(false)
+    SendNUIMessage({ action = 'close' })
 
     if not isNUIOpen then return end
 
@@ -147,13 +147,8 @@ local function CloseNUI()
 
     RemoveTablet()
 
-    SendNUIMessage({
-        action = 'close'
-    })
-
     DebugLog('nui', 'Closed NUI')
 
-    -- Ensure focus is released
     CreateThread(function()
         Wait(100)
         SetNuiFocus(false, false)
@@ -161,6 +156,18 @@ local function CloseNUI()
         ClearPedTasksImmediately(PlayerPedId())
     end)
 end
+
+-- Watchdog: force-release focus if it stays captured while NUI is closed.
+CreateThread(function()
+    while true do
+        Wait(1000)
+        if not isNUIOpen and (IsNuiFocused() or IsNuiFocusKeepingInput()) then
+            SetNuiFocus(false, false)
+            SetNuiFocusKeepInput(false)
+            DebugLog('nui', 'Watchdog released stuck NUI focus')
+        end
+    end
+end)
 
 -- NUI Callbacks
 RegisterNUICallback('close', function(_, cb)
