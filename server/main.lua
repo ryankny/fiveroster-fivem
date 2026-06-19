@@ -432,9 +432,13 @@ local function GetPlayerActiveShift(discordId, callback)
     })
 end
 
--- End a player's active shift via FiveRoster API
-local function EndPlayerShift(discordId, shiftId, reason, callback)
-    local url = Config.FiveRosterURL .. '/api/v1/fivem/shift/' .. shiftId .. '/end'
+-- End a player's currently active shift via FiveRoster API (identified by
+-- Discord ID). Used to auto-end shifts when a player disconnects. This mirrors
+-- the endpoint used by the EndShift export so the disconnect path and the
+-- manual/export path behave identically, and so it works even when we don't
+-- have the shift ID cached locally (e.g. shift started on the web dashboard).
+local function EndPlayerShift(discordId, reason, callback)
+    local url = Config.FiveRosterURL .. '/api/v1/fivem/shift/end'
 
     local requestBody = {
         discord_id = discordId,
@@ -453,6 +457,9 @@ local function EndPlayerShift(discordId, shiftId, reason, callback)
             else
                 callback(false, data and data.message or 'Unknown error')
             end
+        elseif statusCode == 404 then
+            -- No active shift on the backend - nothing to end
+            callback(false, 'No active shift found')
         else
             callback(false, 'HTTP error: ' .. tostring(statusCode))
         end
@@ -712,33 +719,41 @@ exports('GetPlayerRosters', function(source, callback)
     return true
 end)
 
--- Handle player dropping - auto-end their shift
+-- Handle player dropping - auto-end their shift.
+-- We can't rely solely on the in-memory activeShifts cache: a player may have
+-- started their shift on the FiveRoster web dashboard (so it was never tracked
+-- in-game), or the server may have restarted since the shift began, wiping the
+-- cache. Player identifiers are still available during playerDropped, so we
+-- resolve the Discord ID (from the cached shift if present, otherwise live) and
+-- ask the backend to end whatever active shift the player has.
 AddEventHandler('playerDropped', function(reason)
     local source = source
     local shift = activeShifts[source]
 
-    if shift then
-        DebugLog('shift', 'Player %s disconnected with active shift, ending shift...', GetPlayerName(source))
+    -- Clear local tracking immediately
+    activeShifts[source] = nil
 
-        -- End the shift via API
-        EndPlayerShift(shift.discordId, shift.shiftId, 'player_disconnect', function(success, result)
-            if success then
-                DebugLog('shift', 'Successfully ended shift for disconnected player')
-                -- Trigger event for other resources
-                TriggerEvent('fiveroster:onShiftEnded', source, {
-                    shiftId = shift.shiftId,
-                    rosterUuid = shift.rosterUuid,
-                    reason = 'player_disconnect',
-                    discordId = shift.discordId
-                })
-            else
-                DebugLog('shift', 'Failed to end shift for disconnected player: %s', tostring(result))
-            end
-        end)
+    local discordId = (shift and shift.discordId) or GetPlayerDiscordId(source)
+    if not discordId then return end
 
-        -- Clear from local tracking
-        activeShifts[source] = nil
-    end
+    local playerName = GetPlayerName(source) or ('source ' .. tostring(source))
+    DebugLog('shift', 'Player %s disconnected, ending any active shift...', playerName)
+
+    -- End the shift via API (no-op on the backend if there is no active shift)
+    EndPlayerShift(discordId, 'player_disconnect', function(success, result)
+        if success then
+            DebugLog('shift', 'Successfully ended shift for disconnected player %s', playerName)
+            -- Trigger event for other resources (use cached details if available)
+            TriggerEvent('fiveroster:onShiftEnded', source, {
+                shiftId = shift and shift.shiftId,
+                rosterUuid = shift and shift.rosterUuid,
+                reason = 'player_disconnect',
+                discordId = discordId
+            })
+        else
+            DebugLog('shift', 'No shift ended for disconnected player %s: %s', playerName, tostring(result))
+        end
+    end)
 end)
 
 -- Sync active shift when player joins/opens FiveRoster
