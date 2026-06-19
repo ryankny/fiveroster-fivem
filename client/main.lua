@@ -339,6 +339,10 @@ end
 RegisterNetEvent('fiveroster:sessionCreated', function(embedUrl, rosterCount)
     DebugLog('session', 'Session created, roster count: %d', rosterCount or 0)
     OpenNUI(embedUrl)
+
+    -- Sync any active shift the player already has on the backend (e.g. started
+    -- on the web dashboard) so in-game shift state/tracking stays accurate.
+    TriggerServerEvent('fiveroster:syncActiveShift')
 end)
 
 -- Session error
