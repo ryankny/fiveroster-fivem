@@ -8,6 +8,7 @@ Official FiveRoster integration for FiveM servers. Allows players to access rost
 
 - **In-Game Tablet UI** - Beautiful, immersive tablet interface with animations
 - **Shift Tracking** - Players can start and end shifts directly in-game
+- **Shift Breaks** - Pause and resume a shift without ending it; break time is deducted from recorded hours
 - **Auto Shift End** - Automatically ends shifts when players disconnect
 - **Rank-to-Job Sync** - Automatically sync FiveRoster ranks to in-game jobs (ESX/QBCore/QBox)
 - **Multi-Guild Support** - Connect multiple Discord servers (PD, EMS, Fire, etc.)
@@ -125,6 +126,13 @@ Players will automatically see rosters from **all** Discord servers they are a m
 | `/rosters` | Opens the FiveRoster tablet |
 | `/roster` | Alias for /rosters |
 | `/fr` | Alias for /rosters |
+| `/shiftpause` | Start a break on your active shift |
+| `/shiftresume` | End your break and start the clock again |
+| `/shiftbreak` | Toggle the break on/off |
+
+Break command names are configurable under `Config.ShiftPause`, along with an
+optional keybind for the toggle. They are hidden automatically when the
+FiveRoster instance does not support breaks.
 
 ## Multi-Guild Setup
 
@@ -160,12 +168,80 @@ ServerConfig.APIKeys = {
 2. If they have an active shift, it shows in the UI with an "End Shift" button
 3. Players can start shifts from within a roster view
 4. Shifts are tracked in real-time with duration display
-5. When a player disconnects, their shift is automatically ended
+5. When a player disconnects, their shift is automatically ended, however they
+   leave and even if the server never sees a clean disconnect
 
 ### Shift Prevention
 
 - Players can only have **one active shift at a time** across all rosters
 - Attempting to start a second shift will show an error with the current roster name
+
+### Ending Shifts on Disconnect
+
+A shift is ended however the player leaves: the in-game disconnect, closing the
+game, an F8 console `quit` or `disconnect`, a timeout, or a kick.
+
+`playerDropped` is the fast path, but it is not a guarantee, so it is not relied
+on alone:
+
+- The player's Discord ID is cached when they join. By the time `playerDropped`
+  runs, the framework player object is gone and their identifiers can already be
+  unreadable, which previously left the resource with no way to identify whose
+  shift to end.
+- The end request retries connection errors, timeouts, rate limits and 5xx. A
+  retry is abandoned if the player reconnects first, so a fresh shift is never
+  closed by the session that just left.
+- Open shifts, and the ends still owed, are written to `shift_state.json` in
+  this resource's folder. If the server crashes or is killed, the next start
+  settles whatever was left open.
+- A sweep every 60 seconds catches players who vanished without a
+  `playerDropped` that was ever acted on, and retries anything the backend has
+  not confirmed.
+
+Restarting only this resource ends nothing: the players are still connected, so
+their shifts are simply picked back up and re-read from FiveRoster.
+
+Tune or disable this under `Config.ShiftRecovery`. Disable it if the resource
+folder is read-only; the resource detects an unwritable folder on its own, warns
+once, and keeps ending shifts on disconnect without the recovery net.
+
+`shift_state.json` is runtime state, not configuration. It holds Discord IDs and
+shift IDs, never the API key, and can be deleted while the server is stopped.
+
+### Shift Breaks
+
+A shift can be put on a break without ending it. The shift stays open and keeps
+its ID, start time and division flag, but the clock stops. Break time is
+deducted from the hours the shift finally records, so anything reading shift
+hours needs no changes.
+
+- **A paused shift is still an active shift.** `HasActiveShift` keeps returning
+  `true`, and every duty check in this resource keeps saying yes.
+- **The displayed duration is frozen while paused.** The server freezes
+  `duration_seconds`, so nothing counts up locally and then jumps backwards.
+- **Asking for a break you are already on is not an error.** The local state is
+  synced from the response and an informational message is shown. The running
+  break is never restarted, so banked break time is never lost.
+- **Ending a paused shift needs no special handling.** The end endpoint closes
+  the open break itself and records the worked time. Disconnecting while on a
+  break still ends the shift.
+- **Breaks are never auto-resumed.** On reconnect or a resource restart the
+  state is re-read from FiveRoster and reflected as-is.
+
+Breaks can be started from the tablet, from `/shiftpause` and `/shiftresume`,
+from a keybind, or from another resource through the exports below. All of them
+go through the same backend endpoints, so the tablet and the game stay in step.
+
+Older FiveRoster instances without the break routes are detected on the first
+attempt (they answer with an HTML 404 rather than JSON) and the pause control is
+hidden from then on. Everything else keeps working.
+
+#### Optional HUD
+
+`Config.ShiftHUD.enabled` draws a small on-screen indicator with three distinct
+states: hidden when off duty, green **ON DUTY** with a ticking duration, and
+amber **ON BREAK** with the duration frozen. It is off by default so it does not
+collide with an existing server HUD.
 
 ## Rank-to-Job Synchronization
 
@@ -295,7 +371,53 @@ if shift then
     print('Roster UUID:', shift.rosterUuid)
     print('Started At:', shift.startedAt)
     print('Discord ID:', shift.discordId)
+
+    -- Break state (added in 1.3.0)
+    print('On a break:', shift.isPaused)
+    print('Break started at:', shift.pausedAt)
+    print('Total break seconds:', shift.pausedSeconds)
+    print('Breaks taken:', shift.pauseCount)
+    print('Worked seconds:', shift.durationSeconds)
 end
+```
+
+The shift is returned while the player is on a break too. `isPaused` tells the
+two apart; a `nil` return means off duty.
+
+#### Pause, Resume and Toggle a Break
+
+```lua
+-- callback receives (success, info)
+-- info.shift          - the returned shift object
+-- info.alreadyInState - the shift was already paused/running (not an error)
+-- info.noActiveShift  - the player has no open shift
+-- info.unsupported    - this FiveRoster instance has no break routes
+-- info.message        - human-readable message
+
+exports['fiveroster']:PauseShift(source, function(success, info)
+    if success and info.alreadyInState then
+        print('Already on a break - nothing changed')
+    elseif success then
+        print('Break started')
+    end
+end)
+
+exports['fiveroster']:ResumeShift(source, function(success, info) end)
+exports['fiveroster']:ToggleShiftPause(source, function(success, info) end)
+```
+
+#### Check Break State
+
+```lua
+-- Returns: boolean. NOT the opposite of HasActiveShift - a paused player is
+-- still on duty.
+local onBreak = exports['fiveroster']:IsShiftPaused(source)
+
+-- Worked seconds, frozen while on a break. Returns nil when off duty.
+local worked = exports['fiveroster']:GetShiftDuration(source)
+
+-- Whether breaks are usable on this server and FiveRoster instance
+local canPause = exports['fiveroster']:IsShiftPauseSupported()
 ```
 
 #### Start a Shift
@@ -376,8 +498,16 @@ local shift = exports['fiveroster']:GetActiveShift()
 if shift then
     print('Roster:', shift.roster_name)
     print('Started:', shift.started_at)
+
+    -- Break state (added in 1.3.0)
+    print('On a break:', shift.is_paused)
+    print('Total break seconds:', shift.paused_seconds)
+    print('Worked seconds:', shift.duration_seconds)
 end
 ```
+
+Both `snake_case` and `camelCase` keys are present on the returned table, so
+code written against either spelling keeps working.
 
 #### Start a Shift (Client)
 
@@ -392,8 +522,27 @@ exports['fiveroster']:StartShift('roster-uuid-here', nil)
 
 ```lua
 -- Triggers server-side API call, result comes via events
+-- Works the same on a paused shift: the backend closes the open break itself.
 
 exports['fiveroster']:EndShift()
+```
+
+#### Pause, Resume and Toggle a Break (Client)
+
+```lua
+-- Trigger server-side API calls, result comes via events
+exports['fiveroster']:PauseShift()
+exports['fiveroster']:ResumeShift()
+exports['fiveroster']:ToggleShiftPause()
+
+-- Returns: boolean. A paused player is still on duty.
+local onBreak = exports['fiveroster']:IsShiftPaused()
+
+-- Worked seconds, frozen while on a break. Returns nil when off duty.
+local worked = exports['fiveroster']:GetShiftDuration()
+
+-- Hide your own pause control when this returns false
+local canPause = exports['fiveroster']:IsShiftPauseSupported()
 ```
 
 ## Events
@@ -416,6 +565,18 @@ AddEventHandler('fiveroster:onShiftEnded', function(source, shiftData)
     print('Duration:', shiftData.durationSeconds, 'seconds')
     -- shiftData.reason may be: 'manual', 'player_disconnect', 'external_resource'
 end)
+
+-- Triggered when a player starts a break. The shift is still active.
+AddEventHandler('fiveroster:onShiftPaused', function(source, shiftData)
+    print('Player went on a break:', GetPlayerName(source))
+    print('Breaks taken:', shiftData.pauseCount)
+end)
+
+-- Triggered when a player ends a break
+AddEventHandler('fiveroster:onShiftResumed', function(source, shiftData)
+    print('Player is working again:', GetPlayerName(source))
+    print('Total break seconds:', shiftData.pausedSeconds)
+end)
 ```
 
 ### Client-Side Events
@@ -429,6 +590,16 @@ end)
 -- Triggered when the local player ends a shift
 AddEventHandler('fiveroster:onShiftEnded', function(shiftData)
     print('Shift ended. Duration:', shiftData.duration_formatted)
+end)
+
+-- Triggered when the local player starts a break. Still on duty.
+AddEventHandler('fiveroster:onShiftPaused', function(shiftData)
+    print('On a break since', shiftData.paused_at)
+end)
+
+-- Triggered when the local player ends a break
+AddEventHandler('fiveroster:onShiftResumed', function(shiftData)
+    print('Working again on', shiftData.roster_name)
 end)
 ```
 
