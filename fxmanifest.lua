@@ -4,7 +4,7 @@ game 'gta5'
 name 'fiveroster'
 author 'FiveRoster'
 description 'Official FiveRoster integration for FiveM - In-game roster management and shift tracking'
-version '1.2.0'
+version '1.3.0'
 repository 'https://github.com/FiveRoster/fiveroster-fivem'
 
 lua54 'yes'
@@ -41,7 +41,13 @@ exports {
     'HasActiveShift',
     'GetActiveShift',
     'StartShift',
-    'EndShift'
+    'EndShift',
+    'PauseShift',
+    'ResumeShift',
+    'ToggleShiftPause',
+    'IsShiftPaused',
+    'GetShiftDuration',
+    'IsShiftPauseSupported'
 }
 
 server_exports {
@@ -50,6 +56,12 @@ server_exports {
     'GetActiveShift',
     'StartShift',
     'EndShift',
+    'PauseShift',
+    'ResumeShift',
+    'ToggleShiftPause',
+    'IsShiftPaused',
+    'GetShiftDuration',
+    'IsShiftPauseSupported',
     'GetPlayerRosters',
     'SyncPlayerJob',
     'GetJobForRank'

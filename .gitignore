@@ -1,6 +1,10 @@
 # Server configuration (contains API key - DO NOT COMMIT)
 server/config.lua
 
+# AI assistant folders and settings - DO NOT COMMIT
+.claude/
+CLAUDE.md
+
 # IDE files
 .idea/
 .vscode/
