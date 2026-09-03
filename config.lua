@@ -179,6 +179,30 @@ Config.ShiftSync = {
 
 --[[
     ============================================================================
+    DISCONNECT RECOVERY
+    ============================================================================
+    Shifts are ended the moment a player disconnects, however they leave - the
+    in-game disconnect button, closing the game, an F8 console quit/disconnect,
+    a timeout, or a kick.
+
+    playerDropped is the fast path, but it is not a guarantee: it is never fired
+    at all if the server crashes or is killed, and even when it fires the HTTP
+    request can die with the process. So the open shifts and the ends still owed
+    are written to a small state file in this resource's folder. Anything left
+    over is settled on the next resource start, and a periodic sweep catches
+    players who vanished without a disconnect we ever handled.
+
+    Leave this enabled unless the resource folder is read-only.
+]]
+Config.ShiftRecovery = {
+    enabled = true,                   -- Recover shifts left open by a lost disconnect
+    reconcileInterval = 60000,        -- How often to sweep for vanished players (ms)
+    maxRetryAttempts = 60,            -- Give up on one shift after this many sweeps
+    stateFile = 'shift_state.json'    -- Written inside this resource's folder
+}
+
+--[[
+    ============================================================================
     RANK-TO-JOB SYNCHRONIZATION
     ============================================================================
     Automatically sync FiveRoster ranks to in-game jobs/grades.

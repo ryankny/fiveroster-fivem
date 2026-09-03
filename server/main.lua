@@ -308,6 +308,10 @@ local function IsDiscordIdOnline(discordId)
     return false
 end
 
+-- Forward declarations: defined further down, once their dependencies exist.
+local RefreshDiscordIdCache
+local SyncPlayerShiftState
+
 -- Warm the cache for a player (fire and forget)
 local function CachePlayerDiscordId(source)
     local discordId = ResolvePlayerDiscordId(source)
@@ -542,6 +546,7 @@ local function ApplyShiftPayload(src, discordId, shift)
     tracked.rosterName = shift.roster_name or tracked.rosterName or 'Unknown Roster'
     tracked.startedAt = shift.started_at or tracked.startedAt
     tracked.discordId = discordId or tracked.discordId
+    tracked.playerName = GetPlayerName(src) or tracked.playerName
 
     -- Break state. An older backend omits these entirely, which correctly
     -- leaves the shift reading as running rather than paused.
@@ -744,6 +749,251 @@ local function EndPlayerShift(discordId, reason, callback, attempt)
     end, 'POST', json.encode(requestBody), ApiHeaders())
 end
 
+-- ============================================================================
+-- DISCONNECT RECOVERY
+-- ============================================================================
+-- playerDropped is the fast path for ending a shift, but it is not a guarantee.
+-- The event can be missed entirely (server crash, hard shutdown), and even when
+-- it fires the HTTP request can die with the process. So the shifts this server
+-- believes are open, plus the ends it still owes, are written to disk. Anything
+-- left over is settled on the next resource start, and a periodic sweep catches
+-- players who vanished without a playerDropped we ever saw.
+
+local function RecoverySetting(key, default)
+    local configured = Config.ShiftRecovery and Config.ShiftRecovery[key]
+    if configured ~= nil then return configured end
+    return default
+end
+
+local SHIFT_STATE_FILE = RecoverySetting('stateFile', 'shift_state.json')
+local RECONCILE_INTERVAL = RecoverySetting('reconcileInterval', 60000)
+local PENDING_END_MAX_ATTEMPTS = RecoverySetting('maxRetryAttempts', 60)
+
+-- Ends we still owe the backend, keyed by Discord ID
+local pendingEnds = {}
+
+-- Flipped off (once, with a warning) if the resource directory is not writable
+local canPersistShiftState = true
+
+-- Rebuild the Discord ID cache from the players who are actually connected.
+-- Warms it for anyone we have not seen, and prunes anyone who has left, so
+-- IsDiscordIdOnline stays honest for the recovery paths below.
+RefreshDiscordIdCache = function()
+    local connected = {}
+
+    for _, playerId in ipairs(GetPlayers()) do
+        local src = tonumber(playerId) or playerId
+        connected[src] = true
+        if not playerDiscordIds[src] then
+            ResolvePlayerDiscordId(src)
+        end
+    end
+
+    for src in pairs(playerDiscordIds) do
+        if not connected[src] then
+            playerDiscordIds[src] = nil
+        end
+    end
+end
+
+-- Which connected player, if any, holds this Discord ID
+local function GetSourceForDiscordId(discordId)
+    for src, cached in pairs(playerDiscordIds) do
+        if cached == discordId then return src end
+    end
+    return nil
+end
+
+local function BuildShiftStateDocument()
+    local open = {}
+
+    for src, shift in pairs(activeShifts) do
+        if shift.discordId then
+            open[shift.discordId] = {
+                shiftId = shift.shiftId,
+                rosterUuid = shift.rosterUuid,
+                rosterName = shift.rosterName,
+                playerName = GetPlayerName(src) or shift.playerName,
+                since = shift.since or os.time()
+            }
+        end
+    end
+
+    return { version = 1, open = open, pending = pendingEnds }
+end
+
+local function PersistShiftState()
+    if not canPersistShiftState then return end
+    if RecoverySetting('enabled', true) == false then return end
+
+    local ok, err = pcall(function()
+        local encoded = json.encode(BuildShiftStateDocument())
+        if SaveResourceFile(GetCurrentResourceName(), SHIFT_STATE_FILE, encoded, -1) == false then
+            error('SaveResourceFile refused the write')
+        end
+    end)
+
+    if not ok then
+        canPersistShiftState = false
+        print('^3[FiveRoster]^7 Could not write ' .. SHIFT_STATE_FILE .. ': ' .. tostring(err))
+        print('^3[FiveRoster]^7 Shifts still end on disconnect, but cannot be recovered after a crash.')
+    end
+end
+
+-- Record that we owe the backend an end for this player. Written before the
+-- request goes out so a crash mid-flight cannot lose it.
+local function QueuePendingEnd(entry, origin, defer)
+    if type(entry) ~= 'table' or not entry.discordId then return end
+
+    local existing = pendingEnds[entry.discordId]
+
+    pendingEnds[entry.discordId] = {
+        discordId = entry.discordId,
+        shiftId = entry.shiftId or (existing and existing.shiftId),
+        rosterUuid = entry.rosterUuid or (existing and existing.rosterUuid),
+        rosterName = entry.rosterName or (existing and existing.rosterName),
+        playerName = entry.playerName or (existing and existing.playerName),
+        since = (existing and existing.since) or entry.since or os.time(),
+        origin = origin or (existing and existing.origin),
+        attempts = (existing and existing.attempts) or 0
+    }
+
+    if not defer then PersistShiftState() end
+end
+
+local function ClearPendingEnd(discordId, defer)
+    if pendingEnds[discordId] == nil then return end
+    pendingEnds[discordId] = nil
+    if not defer then PersistShiftState() end
+end
+
+-- Work through everything we still owe. Safe to call repeatedly.
+local function FlushPendingEnds()
+    for discordId, entry in pairs(pendingEnds) do
+        if IsDiscordIdOnline(discordId) then
+            -- They are back. Their live session owns the shift now, and ending
+            -- it here would close one they may have just started.
+            DebugLog('shift', 'Dropping pending end for a reconnected player')
+            ClearPendingEnd(discordId, true)
+        elseif (entry.attempts or 0) >= PENDING_END_MAX_ATTEMPTS then
+            print(('^1[FiveRoster]^7 Giving up on ending the shift for %s after %d attempts')
+                :format(entry.playerName or 'a disconnected player', entry.attempts))
+            ClearPendingEnd(discordId, true)
+        else
+            entry.attempts = (entry.attempts or 0) + 1
+
+            EndPlayerShift(discordId, 'player_disconnect', function(success, result)
+                if success then
+                    DebugLog('shift', 'Ended a shift left open by %s', entry.playerName or 'a disconnected player')
+                    ClearPendingEnd(discordId)
+                elseif result == 'No active shift found' then
+                    -- Already closed (by the web dashboard, or an earlier
+                    -- attempt that we never saw succeed). Nothing owed.
+                    ClearPendingEnd(discordId)
+                else
+                    DebugLog('shift', 'Shift end still pending for %s: %s',
+                        entry.playerName or 'a disconnected player', tostring(result))
+                end
+            end)
+        end
+    end
+
+    PersistShiftState()
+end
+
+-- Catch players who left without a playerDropped we acted on, then retry
+-- anything still owed.
+local function ReconcileShifts()
+    RefreshDiscordIdCache()
+
+    for src, shift in pairs(activeShifts) do
+        if not GetPlayerName(src) then
+            DebugLog('shift', 'Reconciler found a tracked shift for a player who is gone (source %s)', tostring(src))
+            activeShifts[src] = nil
+            QueuePendingEnd({
+                discordId = shift.discordId,
+                shiftId = shift.shiftId,
+                rosterUuid = shift.rosterUuid,
+                rosterName = shift.rosterName,
+                playerName = shift.playerName
+            }, 'reconcile', true)
+        end
+    end
+
+    FlushPendingEnds()
+end
+
+-- Settle whatever the previous session left behind.
+local function RecoverShiftState()
+    local raw = LoadResourceFile(GetCurrentResourceName(), SHIFT_STATE_FILE)
+    if not raw or raw == '' then return end
+
+    local state = TryDecodeJson(raw)
+    if not state then
+        DebugLog('shift', 'Ignoring unreadable %s', SHIFT_STATE_FILE)
+        return
+    end
+
+    local recovered = 0
+
+    if type(state.pending) == 'table' then
+        for discordId, entry in pairs(state.pending) do
+            if type(discordId) == 'string' and type(entry) == 'table' then
+                entry.discordId = discordId
+                QueuePendingEnd(entry, entry.origin or 'previous_session', true)
+                recovered = recovered + 1
+            end
+        end
+    end
+
+    -- Shifts we still believed were open when this server went away.
+    if type(state.open) == 'table' then
+        local readopted = 0
+
+        for discordId, entry in pairs(state.open) do
+            if type(discordId) == 'string' and type(entry) == 'table' then
+                entry.discordId = discordId
+                local src = GetSourceForDiscordId(discordId)
+
+                if src then
+                    -- Still connected, so this was a resource restart rather
+                    -- than a disconnect. Pick the shift back up (and re-read it
+                    -- from FiveRoster) instead of ending it - and instead of
+                    -- forgetting it, which would lose the record on the next
+                    -- restart.
+                    activeShifts[src] = activeShifts[src] or {
+                        shiftId = entry.shiftId,
+                        rosterUuid = entry.rosterUuid,
+                        rosterName = entry.rosterName,
+                        playerName = entry.playerName or GetPlayerName(src),
+                        discordId = discordId,
+                        isPaused = false,
+                        pausedSeconds = 0,
+                        pauseCount = 0,
+                        durationSeconds = 0,
+                        durationSyncedAt = os.time(),
+                        since = entry.since
+                    }
+                    readopted = readopted + 1
+                    if SyncPlayerShiftState then SyncPlayerShiftState(src) end
+                else
+                    -- Nobody holds this ID, so their disconnect was never handled.
+                    QueuePendingEnd(entry, 'server_restart', true)
+                    recovered = recovered + 1
+                end
+            end
+        end
+
+        if readopted > 0 then
+            DebugLog('shift', 'Picked back up %d shift(s) for players who are still connected', readopted)
+        end
+    end
+
+    if recovered > 0 then
+        print(('^3[FiveRoster]^7 Settling %d shift(s) left open by a previous session'):format(recovered))
+    end
+end
+
 -- Handle shift started notification from NUI/web
 RegisterNetEvent('fiveroster:shiftStarted', function(shiftData)
     local source = source
@@ -758,6 +1008,7 @@ RegisterNetEvent('fiveroster:shiftStarted', function(shiftData)
         rosterName = shiftData.roster_name or 'Unknown Roster',
         startedAt = shiftData.started_at,
         discordId = discordId,
+        playerName = GetPlayerName(source),
         isPaused = false,
         pausedAt = nil,
         pausedSeconds = 0,
@@ -767,6 +1018,9 @@ RegisterNetEvent('fiveroster:shiftStarted', function(shiftData)
     }
 
     DebugLog('shift', 'Player %s started shift %s on roster %s', GetPlayerName(source), shiftData.shift_id, shiftData.roster_uuid)
+
+    -- Remember it on disk so a crash cannot lose the fact it is open
+    PersistShiftState()
 
     -- Trigger event for other resources to use
     TriggerEvent('fiveroster:onShiftStarted', source, activeShifts[source])
@@ -784,6 +1038,8 @@ RegisterNetEvent('fiveroster:shiftEnded', function(shiftData)
 
     local previousShift = activeShifts[source]
     activeShifts[source] = nil
+    ClearPendingEnd(discordId, true)
+    PersistShiftState()
 
     DebugLog('shift', 'Player %s ended shift', GetPlayerName(source))
 
@@ -807,7 +1063,7 @@ end)
 -- to the client. This is the single source of truth used on player load, on a
 -- resource restart, and after the tablet reports a break change.
 -- callback(shift or nil) is optional.
-local function SyncPlayerShiftState(src, callback)
+SyncPlayerShiftState = function(src, callback)
     local discordId = ResolvePlayerDiscordId(src)
 
     if not discordId then
@@ -824,12 +1080,15 @@ local function SyncPlayerShiftState(src, callback)
 
         if shift then
             local tracked = ApplyShiftPayload(src, discordId, shift)
+            PersistShiftState()
             TriggerClientEvent('fiveroster:shiftTracking', src, true, tracked)
             DebugLog('shift', 'Synced active shift for player %s (paused: %s)',
                 GetPlayerName(src), tostring(tracked and tracked.isPaused))
             if callback then callback(tracked) end
         else
             activeShifts[src] = nil
+            ClearPendingEnd(discordId, true)
+            PersistShiftState()
             TriggerClientEvent('fiveroster:shiftTracking', src, false, nil)
             if callback then callback(nil) end
         end
@@ -915,6 +1174,7 @@ local function ChangeShiftPause(src, paused, callback, origin)
         elseif info.noActiveShift then
             -- Backend says there is no open shift - drop stale local tracking.
             activeShifts[src] = nil
+            PersistShiftState()
             TriggerClientEvent('fiveroster:shiftTracking', src, false, nil)
         elseif info.unsupported then
             SendPauseAvailability(src)
@@ -1119,6 +1379,7 @@ exports('StartShift', function(source, rosterUuid, flagId, callback)
             if data and data.success and data.shift then
                 -- Store active shift locally (carries break state if present)
                 ApplyShiftPayload(source, discordId, data.shift)
+                PersistShiftState()
 
                 DebugLog('shift', 'Player %s started shift via export on %s', GetPlayerName(source), data.shift.roster_name)
 
@@ -1188,6 +1449,8 @@ exports('EndShift', function(source, callback)
             if data and data.success and data.shift then
                 -- Clear local tracking
                 activeShifts[source] = nil
+                ClearPendingEnd(discordId, true)
+                PersistShiftState()
 
                 DebugLog('shift', 'Player %s ended shift via export', GetPlayerName(source))
 
@@ -1214,6 +1477,8 @@ exports('EndShift', function(source, callback)
         elseif statusCode == 404 then
             -- No active shift found
             activeShifts[source] = nil
+            ClearPendingEnd(discordId, true)
+            PersistShiftState()
             if callback then callback(false, 'No active shift found') end
         else
             local errorMsg = 'HTTP error: ' .. tostring(statusCode)
@@ -1277,7 +1542,10 @@ AddEventHandler('playerDropped', function(reason)
     local src = source
     local shift = activeShifts[src]
 
-    local playerName = GetPlayerName(src) or ('source ' .. tostring(src))
+    -- GetPlayerName is often already nil here (an F8 quit tears the client
+    -- down before we run), so fall back to the name captured when the shift
+    -- started. Admins need to know who this was.
+    local playerName = GetPlayerName(src) or (shift and shift.playerName) or ('source ' .. tostring(src))
 
     -- Resolve the Discord ID before clearing anything. Order matters: the
     -- cache is the only reliable source once the player is gone, because
@@ -1294,10 +1562,21 @@ AddEventHandler('playerDropped', function(reason)
         if shift then
             print(('^1[FiveRoster]^7 Could not end shift for disconnecting player %s - no Discord ID could be resolved'):format(playerName))
         end
+        PersistShiftState()
         return
     end
 
     DebugLog('shift', 'Player %s disconnected, ending any active shift...', playerName)
+
+    -- Write down what we owe before the request goes out. If this server dies
+    -- mid-flight, or the request never completes, the next start settles it.
+    QueuePendingEnd({
+        discordId = discordId,
+        shiftId = shift and shift.shiftId,
+        rosterUuid = shift and shift.rosterUuid,
+        rosterName = shift and shift.rosterName,
+        playerName = playerName
+    }, 'player_dropped')
 
     -- End the shift via API (no-op on the backend if there is no active shift).
     -- A paused shift needs no special handling: the end endpoint closes the
@@ -1305,6 +1584,7 @@ AddEventHandler('playerDropped', function(reason)
     EndPlayerShift(discordId, 'player_disconnect', function(success, result)
         if success then
             DebugLog('shift', 'Successfully ended shift for disconnected player %s', playerName)
+            ClearPendingEnd(discordId)
             -- Trigger event for other resources (use cached details if available)
             TriggerEvent('fiveroster:onShiftEnded', src, {
                 shiftId = shift and shift.shiftId,
@@ -1312,8 +1592,14 @@ AddEventHandler('playerDropped', function(reason)
                 reason = 'player_disconnect',
                 discordId = discordId
             })
+        elseif result == 'No active shift found' then
+            -- Nothing was open. Debt settled.
+            DebugLog('shift', 'No shift to end for disconnected player %s', playerName)
+            ClearPendingEnd(discordId)
         else
-            DebugLog('shift', 'No shift ended for disconnected player %s: %s', playerName, tostring(result))
+            -- Left pending on purpose: the sweep and the next resource start
+            -- keep trying rather than losing the shift.
+            DebugLog('shift', 'Shift end for %s left pending: %s', playerName, tostring(result))
         end
     end)
 end)
@@ -1694,15 +1980,42 @@ AddEventHandler('onResourceStart', function(resourceName)
     -- A resource restart wipes the in-memory caches while players stay
     -- connected. Re-warm the Discord ID cache straight away so a disconnect is
     -- still able to end their shift; the clients re-request their own shift
-    -- state as they come back up.
+    -- state as they come back up. Then settle anything the previous session
+    -- left open and keep sweeping for players who left without us noticing.
     CreateThread(function()
         Wait(1000)
-        local players = GetPlayers()
-        for _, playerId in ipairs(players) do
-            CachePlayerDiscordId(tonumber(playerId) or playerId)
+        RefreshDiscordIdCache()
+
+        if RecoverySetting('enabled', true) == false then
+            print('^3[FiveRoster]^7 Disconnect recovery disabled by config')
+            return
         end
-        if #players > 0 then
-            DebugLog('shift', 'Re-warmed Discord ID cache for %d connected player(s)', #players)
+
+        -- Give players who are mid-join a moment to land before deciding that
+        -- nobody holds a given Discord ID.
+        Wait(5000)
+        RefreshDiscordIdCache()
+
+        RecoverShiftState()
+        FlushPendingEnds()
+    end)
+
+    if RecoverySetting('enabled', true) == false then return end
+
+    -- Periodic sweep: catches players who left without a playerDropped we ever
+    -- acted on, and retries anything the backend has not confirmed yet.
+    CreateThread(function()
+        while true do
+            Wait(RECONCILE_INTERVAL)
+            ReconcileShifts()
         end
     end)
+end)
+
+-- Persist on the way out. On a plain resource restart the players are still
+-- connected, so nothing is ended and the state is simply picked back up. On a
+-- real shutdown they are gone by the next start, and their shifts get closed.
+AddEventHandler('onResourceStop', function(resourceName)
+    if GetCurrentResourceName() ~= resourceName then return end
+    PersistShiftState()
 end)

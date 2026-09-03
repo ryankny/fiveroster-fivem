@@ -168,12 +168,45 @@ ServerConfig.APIKeys = {
 2. If they have an active shift, it shows in the UI with an "End Shift" button
 3. Players can start shifts from within a roster view
 4. Shifts are tracked in real-time with duration display
-5. When a player disconnects, their shift is automatically ended
+5. When a player disconnects, their shift is automatically ended, however they
+   leave and even if the server never sees a clean disconnect
 
 ### Shift Prevention
 
 - Players can only have **one active shift at a time** across all rosters
 - Attempting to start a second shift will show an error with the current roster name
+
+### Ending Shifts on Disconnect
+
+A shift is ended however the player leaves: the in-game disconnect, closing the
+game, an F8 console `quit` or `disconnect`, a timeout, or a kick.
+
+`playerDropped` is the fast path, but it is not a guarantee, so it is not relied
+on alone:
+
+- The player's Discord ID is cached when they join. By the time `playerDropped`
+  runs, the framework player object is gone and their identifiers can already be
+  unreadable, which previously left the resource with no way to identify whose
+  shift to end.
+- The end request retries connection errors, timeouts, rate limits and 5xx. A
+  retry is abandoned if the player reconnects first, so a fresh shift is never
+  closed by the session that just left.
+- Open shifts, and the ends still owed, are written to `shift_state.json` in
+  this resource's folder. If the server crashes or is killed, the next start
+  settles whatever was left open.
+- A sweep every 60 seconds catches players who vanished without a
+  `playerDropped` that was ever acted on, and retries anything the backend has
+  not confirmed.
+
+Restarting only this resource ends nothing: the players are still connected, so
+their shifts are simply picked back up and re-read from FiveRoster.
+
+Tune or disable this under `Config.ShiftRecovery`. Disable it if the resource
+folder is read-only; the resource detects an unwritable folder on its own, warns
+once, and keeps ending shifts on disconnect without the recovery net.
+
+`shift_state.json` is runtime state, not configuration. It holds Discord IDs and
+shift IDs, never the API key, and can be deleted while the server is stopped.
 
 ### Shift Breaks
 
