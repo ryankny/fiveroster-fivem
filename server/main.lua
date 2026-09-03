@@ -14,11 +14,22 @@
     - GetActiveShift(source) : table or nil
     - StartShift(source, rosterUuid, flagId, callback) : boolean
     - EndShift(source, callback) : boolean
+    - PauseShift(source, callback) : boolean
+    - ResumeShift(source, callback) : boolean
+    - ToggleShiftPause(source, callback) : boolean
+    - IsShiftPaused(source) : boolean
+    - GetShiftDuration(source) : number or nil
+    - IsShiftPauseSupported() : boolean
     - GetPlayerRosters(source, callback) : boolean
 
     Events triggered:
     - fiveroster:onShiftStarted (source, shiftData)
     - fiveroster:onShiftEnded (source, shiftData)
+    - fiveroster:onShiftPaused (source, shiftData)
+    - fiveroster:onShiftResumed (source, shiftData)
+
+    A paused shift is still an active shift: HasActiveShift stays true and
+    GetActiveShift keeps returning the shift while the player is on a break.
 
     Documentation: https://docs.fiveroster.com/fivem
     ============================================================================
@@ -77,6 +88,22 @@ local function RedactString(str, showChars)
     local prefix = string.sub(str, 1, showChars)
     local suffix = string.sub(str, -showChars)
     return prefix .. '...' .. string.rep('*', 8) .. '...' .. suffix
+end
+
+-- Decode an API response body, reporting whether it was JSON at all.
+-- A FiveRoster instance that predates a route answers with an HTML 404 page
+-- rather than JSON, which is how we detect unsupported endpoints.
+local function TryDecodeJson(response)
+    if type(response) ~= 'string' or response == '' then
+        return nil, false
+    end
+
+    local ok, decoded = pcall(json.decode, response)
+    if ok and type(decoded) == 'table' then
+        return decoded, true
+    end
+
+    return nil, false
 end
 
 -- Get all configured API keys (combines APIKey and APIKeys)
@@ -230,6 +257,73 @@ local function GetPlayerDiscordId(source)
     return nil
 end
 
+-- ============================================================================
+-- DISCORD ID CACHE
+-- ============================================================================
+-- Discord IDs are cached per source as soon as we see the player.
+--
+-- This matters most on disconnect: by the time playerDropped runs, the player
+-- may already be gone from the framework's player list (ESX/QBCore/custom
+-- sources return nothing), and on some builds their identifiers are no longer
+-- readable either. Without a Discord ID we cannot ask the backend to end the
+-- shift, which is exactly how shifts were being left open when a player quit.
+-- A Discord ID belongs to the account, not the character, so caching it for
+-- the lifetime of the connection is safe.
+local playerDiscordIds = {}
+
+-- Resolve a player's Discord ID, preferring the cached value.
+local function ResolvePlayerDiscordId(source)
+    local key = tonumber(source) or source
+    if key == nil then return nil end
+
+    local cached = playerDiscordIds[key]
+    if cached then return cached end
+
+    -- Identifier and framework lookups can come back empty (or missing
+    -- entirely) for a player who is already on their way out, so never let one
+    -- take down the handler that is trying to end their shift.
+    local ok, resolved = pcall(GetPlayerDiscordId, source)
+    if not ok then
+        DebugLog('discord', 'Discord ID lookup failed for %s: %s', tostring(source), tostring(resolved))
+        return nil
+    end
+
+    if type(resolved) == 'number' then resolved = tostring(resolved) end
+
+    if type(resolved) == 'string' and resolved ~= '' then
+        playerDiscordIds[key] = resolved
+        return resolved
+    end
+
+    return nil
+end
+
+-- Is a Discord ID currently held by a connected player?
+-- Used to abandon a retry when the player has already reconnected, so we never
+-- end a brand new shift on behalf of the session that just dropped.
+local function IsDiscordIdOnline(discordId)
+    for _, cached in pairs(playerDiscordIds) do
+        if cached == discordId then return true end
+    end
+    return false
+end
+
+-- Warm the cache for a player (fire and forget)
+local function CachePlayerDiscordId(source)
+    local discordId = ResolvePlayerDiscordId(source)
+    if discordId then
+        DebugLog('discord', 'Cached Discord ID for %s', GetPlayerName(source) or tostring(source))
+    end
+    return discordId
+end
+
+-- Identifiers are readable from playerJoining onwards, well before the player
+-- can start a shift, so this is the earliest reliable point to cache.
+AddEventHandler('playerJoining', function()
+    local src = source
+    CachePlayerDiscordId(src)
+end)
+
 -- Make HTTP request to FiveRoster API to create session (single guild)
 local function CreateFiveRosterSession(discordId, playerName, callback)
     local url = Config.FiveRosterURL .. '/api/v1/fivem/session'
@@ -381,7 +475,7 @@ RegisterNetEvent('fiveroster:requestSession', function()
     DebugLog('session', 'Using %d API key(s)', #apiKeys)
 
     -- Get Discord ID
-    local discordId = GetPlayerDiscordId(source)
+    local discordId = ResolvePlayerDiscordId(source)
 
     if not discordId then
         DebugLog('session', 'No Discord ID found for player')
@@ -407,29 +501,170 @@ RegisterNetEvent('fiveroster:requestSession', function()
     end
 end)
 
--- Track active shifts for each player (keyed by source)
+-- Track active shifts for each player (keyed by source).
+-- A paused shift stays in here: a break is not a clock-out.
 local activeShifts = {}
 
--- Get player's active shift from FiveRoster API
+-- Whether this FiveRoster instance exposes the shift pause/resume routes.
+-- nil = not determined yet, true/false = confirmed. An instance older than the
+-- break feature answers those routes with an HTML 404 instead of JSON.
+local shiftPauseSupported = nil
+
+-- Standard API headers for authenticated calls
+local function ApiHeaders()
+    return {
+        ['Content-Type'] = 'application/json',
+        ['X-API-KEY'] = GetPrimaryApiKey(),
+        ['Accept'] = 'application/json'
+    }
+end
+
+-- Whether breaks are usable at all (config + backend support)
+local function IsShiftPauseAvailable()
+    if Config.ShiftPause and Config.ShiftPause.enabled == false then return false end
+    return shiftPauseSupported ~= false
+end
+
+-- Tell a client whether it should offer the pause control
+local function SendPauseAvailability(src)
+    TriggerClientEvent('fiveroster:shiftPauseSupported', src, IsShiftPauseAvailable())
+end
+
+-- Merge an API shift object into the locally tracked shift for a source.
+-- Returns the tracked shift table (nil if there was nothing to apply).
+local function ApplyShiftPayload(src, discordId, shift)
+    if type(shift) ~= 'table' then return nil end
+
+    local tracked = activeShifts[src] or {}
+
+    tracked.shiftId = shift.id or tracked.shiftId
+    tracked.rosterUuid = shift.roster_uuid or tracked.rosterUuid
+    tracked.rosterName = shift.roster_name or tracked.rosterName or 'Unknown Roster'
+    tracked.startedAt = shift.started_at or tracked.startedAt
+    tracked.discordId = discordId or tracked.discordId
+
+    -- Break state. An older backend omits these entirely, which correctly
+    -- leaves the shift reading as running rather than paused.
+    if shift.is_paused ~= nil then
+        tracked.isPaused = shift.is_paused == true
+        -- Keep a known break start if this payload did not carry one; clear it
+        -- outright once the shift is running again.
+        if tracked.isPaused then
+            tracked.pausedAt = shift.paused_at or tracked.pausedAt
+        else
+            tracked.pausedAt = nil
+        end
+        -- The presence of the field proves the instance knows about breaks.
+        if shiftPauseSupported == nil then shiftPauseSupported = true end
+    else
+        tracked.isPaused = tracked.isPaused or false
+        tracked.pausedAt = shift.paused_at or tracked.pausedAt
+    end
+    tracked.pausedSeconds = shift.paused_seconds or tracked.pausedSeconds or 0
+    tracked.pauseCount = shift.pause_count or tracked.pauseCount or 0
+    tracked.durationSeconds = shift.duration_seconds or tracked.durationSeconds or 0
+    tracked.formattedDuration = shift.formatted_duration or shift.duration_formatted or tracked.formattedDuration
+
+    -- Wall-clock stamp of the last server-truth duration, so consumers can
+    -- extrapolate a running shift without drifting a paused one.
+    tracked.durationSyncedAt = os.time()
+
+    activeShifts[src] = tracked
+    return tracked
+end
+
+-- Worked seconds for a tracked shift, frozen while the shift is on a break.
+local function GetTrackedShiftDuration(src)
+    local tracked = activeShifts[src]
+    if not tracked then return nil end
+
+    local base = tracked.durationSeconds or 0
+    if tracked.isPaused then return base end
+
+    local since = tracked.durationSyncedAt
+    if not since then return base end
+
+    return base + math.max(0, os.time() - since)
+end
+
+-- Get player's active shift from FiveRoster API.
+-- callback(shift, info) - shift is nil when there is no open shift; info.isJson
+-- is false when the instance answered with something other than JSON.
 local function GetPlayerActiveShift(discordId, callback)
     local url = Config.FiveRosterURL .. '/api/v1/fivem/player/' .. discordId .. '/active-shift'
 
     PerformHttpRequest(url, function(statusCode, response, headers)
-        if statusCode == 200 then
-            local data = json.decode(response)
-            if data and data.success then
-                callback(data.shift)
-            else
-                callback(nil)
-            end
-        else
-            callback(nil)
+        local data, isJson = TryDecodeJson(response)
+
+        if not isJson then
+            DebugLog('api_response', 'Active shift lookup returned a non-JSON body (status %s)', tostring(statusCode))
+            callback(nil, { isJson = false, statusCode = statusCode })
+            return
         end
-    end, 'GET', '', {
-        ['Content-Type'] = 'application/json',
-        ['X-API-KEY'] = GetPrimaryApiKey(),
-        ['Accept'] = 'application/json'
-    })
+
+        if statusCode == 200 and data.success then
+            callback(data.shift, { isJson = true, statusCode = statusCode })
+        else
+            callback(nil, { isJson = true, statusCode = statusCode })
+        end
+    end, 'GET', '', ApiHeaders())
+end
+
+-- Pause or resume a player's shift via the FiveRoster API.
+-- callback(success, info) where info may carry:
+--   shift          - the returned shift object
+--   alreadyInState - the shift was already paused/running (HTTP 409)
+--   noActiveShift  - the player has no open shift (HTTP 404 with JSON)
+--   unsupported    - this FiveRoster instance has no such route
+--   message        - human-readable message
+local function SetPlayerShiftPaused(discordId, paused, callback)
+    local action = paused and 'pause' or 'resume'
+    local url = Config.FiveRosterURL .. '/api/v1/fivem/shift/' .. action
+
+    DebugLog('api_request', 'POST %s (%s shift)', url, action)
+
+    PerformHttpRequest(url, function(statusCode, response, headers)
+        DebugLog('api_response', 'Shift %s status: %s', action, tostring(statusCode))
+
+        local data, isJson = TryDecodeJson(response)
+
+        if not isJson then
+            -- An instance without the break routes serves an HTML 404 page.
+            -- Anything else in that range is still not something we can parse,
+            -- so treat it the same way and stop offering the control.
+            if type(statusCode) == 'number' and statusCode >= 200 and statusCode < 500 then
+                shiftPauseSupported = false
+                DebugLog('shift', 'Shift breaks are not supported by this FiveRoster instance')
+                callback(false, { unsupported = true, message = 'Shift breaks are not available on this FiveRoster instance' })
+            else
+                -- Network/gateway failure - says nothing about route support.
+                callback(false, { message = 'HTTP error: ' .. tostring(statusCode) })
+            end
+            return
+        end
+
+        shiftPauseSupported = true
+
+        if statusCode == 200 and data.success then
+            callback(true, { shift = data.shift, message = data.message })
+        elseif statusCode == 409 then
+            -- The shift was already in the requested state. Not an error, and
+            -- deliberately not retried: the backend leaves the running break
+            -- alone rather than restarting it and losing banked time.
+            callback(true, {
+                shift = data.shift,
+                alreadyInState = true,
+                code = data.code,
+                message = data.message
+            })
+        elseif statusCode == 404 then
+            callback(false, { noActiveShift = true, message = data.message or 'No active shift found' })
+        elseif statusCode == 401 then
+            callback(false, { message = 'API authentication failed. Contact server administrator.' })
+        else
+            callback(false, { message = data.message or ('HTTP error: ' .. tostring(statusCode)) })
+        end
+    end, 'POST', json.encode({ discord_id = discordId }), ApiHeaders())
 end
 
 -- End a player's currently active shift via FiveRoster API (identified by
@@ -437,7 +672,18 @@ end
 -- the endpoint used by the EndShift export so the disconnect path and the
 -- manual/export path behave identically, and so it works even when we don't
 -- have the shift ID cached locally (e.g. shift started on the web dashboard).
-local function EndPlayerShift(discordId, reason, callback)
+--
+-- The backend closes any open break itself and records the worked time, so a
+-- paused shift needs no special handling here.
+--
+-- Transient failures are retried: the disconnect path has no user to retry it
+-- and a dropped request leaves the shift open indefinitely.
+local END_SHIFT_MAX_ATTEMPTS = 3
+local END_SHIFT_RETRY_DELAYS = { 2000, 5000 }
+
+local function EndPlayerShift(discordId, reason, callback, attempt)
+    attempt = attempt or 1
+
     local url = Config.FiveRosterURL .. '/api/v1/fivem/shift/end'
 
     local requestBody = {
@@ -445,45 +691,79 @@ local function EndPlayerShift(discordId, reason, callback)
         reason = reason or 'player_disconnect'
     }
 
-    DebugLog('api_request', 'POST %s (ending shift)', url)
+    DebugLog('api_request', 'POST %s (ending shift, attempt %d)', url, attempt)
 
     PerformHttpRequest(url, function(statusCode, response, headers)
         DebugLog('api_response', 'End shift status: %s', tostring(statusCode))
 
+        local data = TryDecodeJson(response)
+
         if statusCode == 200 then
-            local data = json.decode(response)
             if data and data.success then
                 callback(true, data)
             else
-                callback(false, data and data.message or 'Unknown error')
+                callback(false, (data and data.message) or 'Unknown error')
             end
-        elseif statusCode == 404 then
+            return
+        end
+
+        if statusCode == 404 then
             -- No active shift on the backend - nothing to end
             callback(false, 'No active shift found')
-        else
-            callback(false, 'HTTP error: ' .. tostring(statusCode))
+            return
         end
-    end, 'POST', json.encode(requestBody), {
-        ['Content-Type'] = 'application/json',
-        ['X-API-KEY'] = GetPrimaryApiKey(),
-        ['Accept'] = 'application/json'
-    })
+
+        -- Timeouts, rate limits, gateway errors and outright connection
+        -- failures (FiveM reports those as a non-positive status) are worth
+        -- another go. Anything else is a real rejection.
+        local retryable = type(statusCode) ~= 'number'
+            or statusCode <= 0
+            or statusCode == 408
+            or statusCode == 429
+            or statusCode >= 500
+
+        if retryable and attempt < END_SHIFT_MAX_ATTEMPTS then
+            local delay = END_SHIFT_RETRY_DELAYS[attempt] or 5000
+            DebugLog('shift', 'End shift failed (status %s), retrying in %dms', tostring(statusCode), delay)
+            SetTimeout(delay, function()
+                -- If the player reconnected in the meantime, their new session
+                -- owns the shift now. Ending it here would close a shift they
+                -- just started.
+                if reason == 'player_disconnect' and IsDiscordIdOnline(discordId) then
+                    DebugLog('shift', 'Abandoning end-shift retry - player reconnected')
+                    callback(false, 'Player reconnected before the retry')
+                    return
+                end
+
+                EndPlayerShift(discordId, reason, callback, attempt + 1)
+            end)
+            return
+        end
+
+        callback(false, 'HTTP error: ' .. tostring(statusCode))
+    end, 'POST', json.encode(requestBody), ApiHeaders())
 end
 
 -- Handle shift started notification from NUI/web
 RegisterNetEvent('fiveroster:shiftStarted', function(shiftData)
     local source = source
-    local discordId = GetPlayerDiscordId(source)
+    local discordId = ResolvePlayerDiscordId(source)
 
     if not discordId then return end
 
-    -- Store active shift
+    -- Store active shift. A freshly started shift is never on a break.
     activeShifts[source] = {
         shiftId = shiftData.shift_id,
         rosterUuid = shiftData.roster_uuid,
         rosterName = shiftData.roster_name or 'Unknown Roster',
         startedAt = shiftData.started_at,
-        discordId = discordId
+        discordId = discordId,
+        isPaused = false,
+        pausedAt = nil,
+        pausedSeconds = 0,
+        pauseCount = 0,
+        durationSeconds = shiftData.duration_seconds or 0,
+        durationSyncedAt = os.time()
     }
 
     DebugLog('shift', 'Player %s started shift %s on roster %s', GetPlayerName(source), shiftData.shift_id, shiftData.roster_uuid)
@@ -498,7 +778,7 @@ end)
 -- Handle shift ended notification from NUI/web
 RegisterNetEvent('fiveroster:shiftEnded', function(shiftData)
     local source = source
-    local discordId = GetPlayerDiscordId(source)
+    local discordId = ResolvePlayerDiscordId(source)
 
     if not discordId then return end
 
@@ -519,7 +799,280 @@ RegisterNetEvent('fiveroster:shiftEnded', function(shiftData)
     TriggerClientEvent('fiveroster:shiftTracking', source, false, nil)
 end)
 
--- Check if player has an active shift (export for other resources)
+-- ============================================================================
+-- SHIFT BREAKS (PAUSE / RESUME)
+-- ============================================================================
+
+-- Re-read a player's shift (including break state) from FiveRoster and push it
+-- to the client. This is the single source of truth used on player load, on a
+-- resource restart, and after the tablet reports a break change.
+-- callback(shift or nil) is optional.
+local function SyncPlayerShiftState(src, callback)
+    local discordId = ResolvePlayerDiscordId(src)
+
+    if not discordId then
+        if callback then callback(nil) end
+        return false
+    end
+
+    GetPlayerActiveShift(discordId, function(shift, info)
+        -- The player may have left while the request was in flight.
+        if not GetPlayerName(src) then
+            if callback then callback(nil) end
+            return
+        end
+
+        if shift then
+            local tracked = ApplyShiftPayload(src, discordId, shift)
+            TriggerClientEvent('fiveroster:shiftTracking', src, true, tracked)
+            DebugLog('shift', 'Synced active shift for player %s (paused: %s)',
+                GetPlayerName(src), tostring(tracked and tracked.isPaused))
+            if callback then callback(tracked) end
+        else
+            activeShifts[src] = nil
+            TriggerClientEvent('fiveroster:shiftTracking', src, false, nil)
+            if callback then callback(nil) end
+        end
+
+        SendPauseAvailability(src)
+    end)
+
+    return true
+end
+
+-- Apply a break state change and fan it out to the client and other resources.
+local function BroadcastPauseChange(src, discordId, paused, shift, info)
+    info = info or {}
+
+    local tracked
+    if type(shift) == 'table' then
+        tracked = ApplyShiftPayload(src, discordId, shift)
+    else
+        tracked = activeShifts[src]
+        if tracked then
+            tracked.isPaused = paused
+            tracked.durationSyncedAt = os.time()
+        end
+    end
+
+    if tracked then
+        -- Trust the outcome of the call even if the payload was thin.
+        tracked.isPaused = paused
+    end
+
+    DebugLog('shift', 'Player %s %s their shift', GetPlayerName(src) or tostring(src),
+        paused and 'paused' or 'resumed')
+
+    -- Keep the client's copy of the shift in step (silent state sync).
+    TriggerClientEvent('fiveroster:shiftTracking', src, tracked ~= nil, tracked)
+
+    -- Tell the client to surface the change, unless it originated there.
+    if not info.silent then
+        TriggerClientEvent('fiveroster:shiftPauseChanged', src, paused, tracked, {
+            alreadyInState = info.alreadyInState == true,
+            origin = info.origin
+        })
+    end
+
+    -- Event for other resources. The shift is still active either way.
+    TriggerEvent(paused and 'fiveroster:onShiftPaused' or 'fiveroster:onShiftResumed', src, tracked or {
+        discordId = discordId,
+        isPaused = paused
+    })
+end
+
+-- Pause or resume the given player's shift.
+-- callback(success, info) mirrors SetPlayerShiftPaused.
+local function ChangeShiftPause(src, paused, callback, origin)
+    if Config.ShiftPause and Config.ShiftPause.enabled == false then
+        if callback then callback(false, { unsupported = true, message = 'Shift breaks are disabled on this server' }) end
+        return false
+    end
+
+    if shiftPauseSupported == false then
+        if callback then callback(false, { unsupported = true, message = 'Shift breaks are not available on this FiveRoster instance' }) end
+        return false
+    end
+
+    local discordId = ResolvePlayerDiscordId(src)
+
+    if not discordId then
+        if callback then callback(false, { message = 'Player has no Discord ID' }) end
+        return false
+    end
+
+    SetPlayerShiftPaused(discordId, paused, function(success, info)
+        info = info or {}
+
+        if success then
+            -- A 409 means the shift was already in this state. That is not an
+            -- error: sync from the returned shift and carry on.
+            BroadcastPauseChange(src, discordId, paused, info.shift, {
+                alreadyInState = info.alreadyInState,
+                silent = origin == 'nui',
+                origin = origin
+            })
+        elseif info.noActiveShift then
+            -- Backend says there is no open shift - drop stale local tracking.
+            activeShifts[src] = nil
+            TriggerClientEvent('fiveroster:shiftTracking', src, false, nil)
+        elseif info.unsupported then
+            SendPauseAvailability(src)
+        end
+
+        if callback then callback(success, info) end
+    end)
+
+    return true
+end
+
+-- Handle a break started from the tablet (NUI reported it after the web app
+-- already told the backend). Nothing to call - just mirror the state.
+local function HandleNuiPauseReport(src, shiftData, paused)
+    local discordId = ResolvePlayerDiscordId(src)
+    if not discordId then return end
+
+    shiftPauseSupported = true
+
+    local shift = nil
+    if type(shiftData) == 'table' then
+        shift = {
+            id = shiftData.shift_id,
+            roster_uuid = shiftData.roster_uuid,
+            is_paused = paused,
+            duration_seconds = shiftData.duration_seconds
+        }
+    end
+
+    BroadcastPauseChange(src, discordId, paused, shift, { silent = true, origin = 'nui' })
+
+    -- The tablet payload carries no break totals, so pull the full picture.
+    local syncAfter = not (Config.ShiftSync and Config.ShiftSync.afterPauseChange == false)
+    if syncAfter then
+        SetTimeout(1000, function()
+            SyncPlayerShiftState(src)
+        end)
+    end
+end
+
+RegisterNetEvent('fiveroster:shiftPaused', function(shiftData)
+    HandleNuiPauseReport(source, shiftData, true)
+end)
+
+RegisterNetEvent('fiveroster:shiftResumed', function(shiftData)
+    HandleNuiPauseReport(source, shiftData, false)
+end)
+
+-- Turn a failed pause/resume into the right client-side outcome.
+-- A missing route is never a red error: the control is hidden instead.
+local function ReportPauseFailure(src, success, info)
+    if success then return end
+
+    info = info or {}
+
+    if info.unsupported then
+        SendPauseAvailability(src)
+        TriggerClientEvent('fiveroster:shiftPauseUnavailable', src, info.message)
+        return
+    end
+
+    if info.noActiveShift then
+        TriggerClientEvent('fiveroster:shiftNotActive', src)
+        return
+    end
+
+    TriggerClientEvent('fiveroster:shiftError', src, info.message)
+end
+
+-- Handle a break requested from a command, keybind or client export
+RegisterNetEvent('fiveroster:pauseShiftExternal', function()
+    local src = source
+    ChangeShiftPause(src, true, function(success, info)
+        ReportPauseFailure(src, success, info)
+    end, 'command')
+end)
+
+RegisterNetEvent('fiveroster:resumeShiftExternal', function()
+    local src = source
+    ChangeShiftPause(src, false, function(success, info)
+        ReportPauseFailure(src, success, info)
+    end, 'command')
+end)
+
+RegisterNetEvent('fiveroster:toggleShiftPauseExternal', function()
+    local src = source
+    local tracked = activeShifts[src]
+
+    if tracked then
+        ChangeShiftPause(src, not tracked.isPaused, function(success, info)
+            ReportPauseFailure(src, success, info)
+        end, 'command')
+        return
+    end
+
+    -- Nothing tracked locally: resync first so the toggle acts on the truth
+    -- rather than guessing, which is what stops a reconnect auto-resuming.
+    SyncPlayerShiftState(src, function(shift)
+        if not shift then
+            TriggerClientEvent('fiveroster:shiftNotActive', src)
+            return
+        end
+
+        ChangeShiftPause(src, not shift.isPaused, function(success, info)
+            ReportPauseFailure(src, success, info)
+        end, 'command')
+    end)
+end)
+
+-- Ask the server whether the pause control should be offered
+RegisterNetEvent('fiveroster:requestPauseSupport', function()
+    SendPauseAvailability(source)
+end)
+
+-- Pause a player's shift (export for other resources)
+-- Usage: exports['fiveroster']:PauseShift(source, callback)
+exports('PauseShift', function(source, callback)
+    return ChangeShiftPause(source, true, callback, 'export')
+end)
+
+-- Resume a player's shift (export for other resources)
+-- Usage: exports['fiveroster']:ResumeShift(source, callback)
+exports('ResumeShift', function(source, callback)
+    return ChangeShiftPause(source, false, callback, 'export')
+end)
+
+-- Toggle a player's break state (export for other resources)
+exports('ToggleShiftPause', function(source, callback)
+    local tracked = activeShifts[source]
+
+    if not tracked then
+        if callback then callback(false, { noActiveShift = true, message = 'No active shift found' }) end
+        return false
+    end
+
+    return ChangeShiftPause(source, not tracked.isPaused, callback, 'export')
+end)
+
+-- Is the player's active shift on a break? (export for other resources)
+-- Note: this is NOT the opposite of HasActiveShift - a paused player is still
+-- on duty.
+exports('IsShiftPaused', function(source)
+    local tracked = activeShifts[source]
+    return tracked ~= nil and tracked.isPaused == true
+end)
+
+-- Worked seconds on the player's shift, frozen while on a break
+exports('GetShiftDuration', function(source)
+    return GetTrackedShiftDuration(source)
+end)
+
+-- Whether shift breaks are usable on this server/instance
+exports('IsShiftPauseSupported', function()
+    return IsShiftPauseAvailable()
+end)
+
+-- Check if player has an active shift (export for other resources).
+-- A paused shift is still an active shift.
 exports('HasActiveShift', function(source)
     return activeShifts[source] ~= nil
 end)
@@ -533,7 +1086,7 @@ end)
 -- Usage: exports['fiveroster']:StartShift(source, rosterUuid, flagId, callback)
 -- callback receives (success, data) where data contains shift info or error message
 exports('StartShift', function(source, rosterUuid, flagId, callback)
-    local discordId = GetPlayerDiscordId(source)
+    local discordId = ResolvePlayerDiscordId(source)
 
     if not discordId then
         if callback then callback(false, 'Player has no Discord ID') end
@@ -564,14 +1117,8 @@ exports('StartShift', function(source, rosterUuid, flagId, callback)
         if statusCode == 200 or statusCode == 201 then
             local data = json.decode(response)
             if data and data.success and data.shift then
-                -- Store active shift locally
-                activeShifts[source] = {
-                    shiftId = data.shift.id,
-                    rosterUuid = data.shift.roster_uuid,
-                    rosterName = data.shift.roster_name or 'Unknown Roster',
-                    startedAt = data.shift.started_at,
-                    discordId = discordId
-                }
+                -- Store active shift locally (carries break state if present)
+                ApplyShiftPayload(source, discordId, data.shift)
 
                 DebugLog('shift', 'Player %s started shift via export on %s', GetPlayerName(source), data.shift.roster_name)
 
@@ -610,7 +1157,7 @@ end)
 -- Usage: exports['fiveroster']:EndShift(source, callback)
 -- callback receives (success, data) where data contains shift info or error message
 exports('EndShift', function(source, callback)
-    local discordId = GetPlayerDiscordId(source)
+    local discordId = ResolvePlayerDiscordId(source)
 
     if not discordId then
         if callback then callback(false, 'Player has no Discord ID') end
@@ -686,7 +1233,7 @@ end)
 -- Usage: exports['fiveroster']:GetPlayerRosters(source, callback)
 -- callback receives (success, rosters) where rosters is an array of {roster_uuid, name, shift_tracking_enabled}
 exports('GetPlayerRosters', function(source, callback)
-    local discordId = GetPlayerDiscordId(source)
+    local discordId = ResolvePlayerDiscordId(source)
 
     if not discordId then
         if callback then callback(false, 'Player has no Discord ID') end
@@ -727,24 +1274,39 @@ end)
 -- resolve the Discord ID (from the cached shift if present, otherwise live) and
 -- ask the backend to end whatever active shift the player has.
 AddEventHandler('playerDropped', function(reason)
-    local source = source
-    local shift = activeShifts[source]
+    local src = source
+    local shift = activeShifts[src]
 
-    -- Clear local tracking immediately
-    activeShifts[source] = nil
+    local playerName = GetPlayerName(src) or ('source ' .. tostring(src))
 
-    local discordId = (shift and shift.discordId) or GetPlayerDiscordId(source)
-    if not discordId then return end
+    -- Resolve the Discord ID before clearing anything. Order matters: the
+    -- cache is the only reliable source once the player is gone, because
+    -- framework lookups (and, on some builds, identifiers) return nothing here.
+    local discordId = (shift and shift.discordId) or ResolvePlayerDiscordId(src)
 
-    local playerName = GetPlayerName(source) or ('source ' .. tostring(source))
+    -- Clear local tracking
+    activeShifts[src] = nil
+    playerDiscordIds[tonumber(src) or src] = nil
+
+    if not discordId then
+        -- Nothing we can do without an ID. Say so loudly when we knew the
+        -- player was on shift, since their shift will stay open.
+        if shift then
+            print(('^1[FiveRoster]^7 Could not end shift for disconnecting player %s - no Discord ID could be resolved'):format(playerName))
+        end
+        return
+    end
+
     DebugLog('shift', 'Player %s disconnected, ending any active shift...', playerName)
 
-    -- End the shift via API (no-op on the backend if there is no active shift)
+    -- End the shift via API (no-op on the backend if there is no active shift).
+    -- A paused shift needs no special handling: the end endpoint closes the
+    -- open break itself and records the worked time.
     EndPlayerShift(discordId, 'player_disconnect', function(success, result)
         if success then
             DebugLog('shift', 'Successfully ended shift for disconnected player %s', playerName)
             -- Trigger event for other resources (use cached details if available)
-            TriggerEvent('fiveroster:onShiftEnded', source, {
+            TriggerEvent('fiveroster:onShiftEnded', src, {
                 shiftId = shift and shift.shiftId,
                 rosterUuid = shift and shift.rosterUuid,
                 reason = 'player_disconnect',
@@ -756,30 +1318,30 @@ AddEventHandler('playerDropped', function(reason)
     end)
 end)
 
--- Sync active shift when player joins/opens FiveRoster
+-- Sync active shift (including break state) when a player loads, opens the
+-- tablet, or after a resource restart. Never auto-resumes: whatever the
+-- backend reports is what the player gets.
+--
+-- Clients can trigger this, so it is throttled per player to keep a misbehaving
+-- or scripted client from hammering the FiveRoster API.
+local SYNC_COOLDOWN_SECONDS = 5
+local lastSyncRequest = {}
+
 RegisterNetEvent('fiveroster:syncActiveShift', function()
-    local source = source
-    local discordId = GetPlayerDiscordId(source)
+    local src = source
+    local now = os.time()
 
-    if not discordId then return end
+    if lastSyncRequest[src] and (now - lastSyncRequest[src]) < SYNC_COOLDOWN_SECONDS then
+        DebugLog('shift', 'Ignoring rapid shift sync request from %s', GetPlayerName(src) or tostring(src))
+        return
+    end
 
-    GetPlayerActiveShift(discordId, function(shift)
-        if shift then
-            activeShifts[source] = {
-                shiftId = shift.id,
-                rosterUuid = shift.roster_uuid,
-                rosterName = shift.roster_name or 'Unknown Roster',
-                startedAt = shift.started_at,
-                discordId = discordId
-            }
+    lastSyncRequest[src] = now
+    SyncPlayerShiftState(src)
+end)
 
-            TriggerClientEvent('fiveroster:shiftTracking', source, true, activeShifts[source])
-            DebugLog('shift', 'Synced active shift for player %s', GetPlayerName(source))
-        else
-            activeShifts[source] = nil
-            TriggerClientEvent('fiveroster:shiftTracking', source, false, nil)
-        end
-    end)
+AddEventHandler('playerDropped', function()
+    lastSyncRequest[source] = nil
 end)
 
 -- Handle shift start request from client export
@@ -954,7 +1516,7 @@ end
 local function SyncPlayerJob(source)
     if not Config.JobSync or not Config.JobSync.enabled then return end
 
-    local discordId = GetPlayerDiscordId(source)
+    local discordId = ResolvePlayerDiscordId(source)
     if not discordId then
         DebugLog('job_sync', 'Cannot sync job - no Discord ID for player %s', GetPlayerName(source))
         return
@@ -1069,7 +1631,7 @@ RegisterNetEvent('fiveroster:rankChanged', function(data)
 
     -- Find player by Discord ID
     for _, playerId in ipairs(GetPlayers()) do
-        local playerDiscordId = GetPlayerDiscordId(playerId)
+        local playerDiscordId = ResolvePlayerDiscordId(playerId)
         if playerDiscordId == discordId then
             DebugLog('job_sync', 'Rank change detected for player %s, syncing job...', GetPlayerName(playerId))
             SyncPlayerJob(playerId)
@@ -1123,4 +1685,24 @@ AddEventHandler('onResourceStart', function(resourceName)
         print('^2[FiveRoster]^7 Job sync enabled (' .. Config.JobSync.framework .. ')')
         SetupJobSyncOnPlayerLoad()
     end
+
+    if Config.ShiftPause and Config.ShiftPause.enabled == false then
+        shiftPauseSupported = false
+        print('^3[FiveRoster]^7 Shift breaks disabled by config')
+    end
+
+    -- A resource restart wipes the in-memory caches while players stay
+    -- connected. Re-warm the Discord ID cache straight away so a disconnect is
+    -- still able to end their shift; the clients re-request their own shift
+    -- state as they come back up.
+    CreateThread(function()
+        Wait(1000)
+        local players = GetPlayers()
+        for _, playerId in ipairs(players) do
+            CachePlayerDiscordId(tonumber(playerId) or playerId)
+        end
+        if #players > 0 then
+            DebugLog('shift', 'Re-warmed Discord ID cache for %d connected player(s)', #players)
+        end
+    end)
 end)

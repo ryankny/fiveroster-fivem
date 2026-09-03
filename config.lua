@@ -106,7 +106,75 @@ Config.Messages = {
     error = 'An error occurred. Please try again.',
     session_error = 'Failed to connect to FiveRoster. Please try again.',
     not_in_guild = 'You are not a member of this Discord server.',
-    no_rosters = 'You are not enrolled in any rosters.'
+    no_rosters = 'You are not enrolled in any rosters.',
+
+    -- Shift break (pause/resume) messages.
+    -- These are optional: if you are upgrading and kept your old config.lua,
+    -- the resource falls back to these defaults automatically.
+    shift_paused = 'Shift paused. You are on a break.',
+    shift_resumed = 'Break over. Your shift is running again.',
+    shift_already_paused = 'You are already on a break.',
+    shift_already_running = 'Your shift is already running.',
+    shift_not_active = 'You are not currently on shift.',
+    shift_pause_unavailable = 'Shift breaks are not available on this FiveRoster instance.'
+}
+
+--[[
+    ============================================================================
+    SHIFT BREAKS (PAUSE / RESUME)
+    ============================================================================
+    Players can put a shift on a break without ending it. The shift stays open
+    and keeps its ID, start time and division flag, but the clock stops and the
+    break time is deducted from the hours the shift finally records.
+
+    Requires a FiveRoster instance that exposes the shift pause/resume routes.
+    Older instances are detected automatically and the controls are hidden.
+]]
+Config.ShiftPause = {
+    enabled = true,                  -- Allow pausing/resuming shifts in-game
+
+    pauseCommand = 'shiftpause',     -- /shiftpause  - start a break
+    resumeCommand = 'shiftresume',   -- /shiftresume - end the break
+    toggleCommand = 'shiftbreak',    -- /shiftbreak  - toggle break on/off
+
+    -- Register a keybind for the toggle command (players rebind it in
+    -- Settings > Key Bindings > FiveM). Leave empty for no default key.
+    toggleKey = ''                   -- Example: 'B'
+}
+
+--[[
+    ============================================================================
+    SHIFT HUD
+    ============================================================================
+    Optional on-screen indicator showing whether the player is on duty or on a
+    break, with the worked duration. The duration is frozen while on a break,
+    matching the server, so it never drifts or jumps backwards.
+
+    Disabled by default so it does not collide with an existing server HUD.
+    Other resources can read the same state via the exports instead.
+]]
+Config.ShiftHUD = {
+    enabled = false,          -- Set to true to draw the built-in indicator
+    x = 0.015,                -- Screen position (0.0 - 1.0)
+    y = 0.88,
+    scale = 0.35,             -- Text scale
+    showRosterName = true,    -- Include the roster name in the indicator
+    onDutyLabel = 'ON DUTY',
+    onBreakLabel = 'ON BREAK'
+}
+
+--[[
+    ============================================================================
+    SHIFT STATE SYNC
+    ============================================================================
+    The in-game shift state is re-read from FiveRoster so it reflects shifts
+    (and breaks) started anywhere - the tablet, the web dashboard, or another
+    server - and survives a resource restart.
+]]
+Config.ShiftSync = {
+    onPlayerLoad = true,      -- Sync shortly after the player's client starts
+    playerLoadDelay = 5000,   -- Delay in ms before that first sync
+    afterPauseChange = true   -- Re-read full break totals after a tablet pause/resume
 }
 
 --[[

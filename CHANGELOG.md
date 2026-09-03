@@ -5,6 +5,47 @@ All notable changes to FiveRoster for FiveM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-09-03
+
+### Added
+- **Shift Breaks** - Pause and resume a shift without ending it. The shift stays
+  open and keeps its ID, start time and division flag; break time is deducted
+  from the hours it finally records
+  - `/shiftpause`, `/shiftresume` and a `/shiftbreak` toggle, all configurable
+    under `Config.ShiftPause`, with an optional keybind for the toggle
+  - `shiftPaused` and `shiftResumed` NUI callbacks so the tablet's Pause and
+    Resume buttons update the game client
+  - `PauseShift`, `ResumeShift`, `ToggleShiftPause`, `IsShiftPaused`,
+    `GetShiftDuration` and `IsShiftPauseSupported` exports on both sides
+  - `fiveroster:onShiftPaused` and `fiveroster:onShiftResumed` events
+  - Break state (`isPaused`, `pausedAt`, `pausedSeconds`, `pauseCount`,
+    `durationSeconds`) on the shift tables returned by `GetActiveShift`
+  - A shift already in the requested state (HTTP 409) is treated as
+    informational, never as an error, and is never retried
+  - Instances without the break routes are detected and the control is hidden
+- **Optional shift HUD** (`Config.ShiftHUD`, off by default) showing on duty and
+  on break as distinct states, with the duration frozen during a break
+- **Shift state resync on player load and resource restart** so breaks started
+  on the web dashboard, or outliving a restart, are reflected in-game
+
+### Fixed
+- **Shifts no longer stay open when a player disconnects.** The Discord ID is
+  now cached from `playerJoining`, because by the time `playerDropped` runs the
+  framework player object is gone and identifiers can already be unreadable.
+  Without an ID the resource had no way to ask the backend to end the shift and
+  silently gave up
+- The disconnect end request now retries transient failures (connection errors,
+  timeouts, rate limits and 5xx) instead of dropping the shift on the floor
+- A failed disconnect end is logged with the player's name when a shift was
+  known to be open, instead of failing silently
+- Non-JSON API responses no longer raise inside a response handler
+
+### Changed
+- Updated fxmanifest version to 1.3.0
+- Added the new exports to fxmanifest
+- Shift tables handed to client code now carry both `snake_case` and `camelCase`
+  keys, so existing consumers of either spelling keep working
+
 ## [1.2.0] - 2026-04-02
 
 ### Added
