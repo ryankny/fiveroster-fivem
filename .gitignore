@@ -1,6 +1,9 @@
 # Server configuration (contains API key - DO NOT COMMIT)
 server/config.lua
 
+# Runtime shift recovery state (written by the resource at runtime)
+shift_state.json
+
 # IDE files
 .idea/
 .vscode/
