@@ -5,6 +5,9 @@ server/config.lua
 .claude/
 CLAUDE.md
 
+# Runtime shift recovery state (written by the resource at runtime)
+shift_state.json
+
 # IDE files
 .idea/
 .vscode/

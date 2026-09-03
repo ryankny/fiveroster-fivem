@@ -35,7 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Without an ID the resource had no way to ask the backend to end the shift and
   silently gave up
 - The disconnect end request now retries transient failures (connection errors,
-  timeouts, rate limits and 5xx) instead of dropping the shift on the floor
+  timeouts, rate limits and 5xx) instead of dropping the shift on the floor.
+  Retries are abandoned if the player reconnects, so a new shift is never closed
+  by the session that just left
+- Shifts are no longer lost when `playerDropped` is never fired or never
+  completes. Open shifts and the ends still owed are written to
+  `shift_state.json`, so a server crash, a hard shutdown or a backend outage is
+  settled on the next resource start. A sweep every 60 seconds catches players
+  who vanished without a disconnect the resource ever acted on. Restarting only
+  the resource ends nothing: connected players' shifts are picked back up and
+  re-read from FiveRoster. Configurable under `Config.ShiftRecovery`, and it
+  degrades to in-memory behaviour with a warning if the folder is read-only
 - A failed disconnect end is logged with the player's name when a shift was
   known to be open, instead of failing silently
 - Non-JSON API responses no longer raise inside a response handler
