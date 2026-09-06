@@ -5,6 +5,40 @@ All notable changes to FiveRoster for FiveM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-09-06
+
+### Added
+- **Training presentations on in-game screens.** A presenter stands at a screen,
+  runs `/present`, picks one of their roster's FiveRoster training decks, and it
+  appears on that screen for everyone nearby
+  - Left / Right arrow change slide, Backspace ends the cast; the keys are
+    configurable under `Config.Presentations`
+  - The game server owns the slide index and broadcasts it, so everybody sees
+    the same slide and a player who arrives mid-briefing joins on the slide
+    that is showing. Only the presenter can move the deck
+  - Any prop of a model listed in `Config.Presentations.screenModels` is a
+    castable screen; `fixedScreens` places screens this resource owns, for
+    briefing rooms with no TV in the map
+  - `Config.Presentations.maxScreens` caps how many screens are drawn at once,
+    and browser surfaces are pooled rather than rebuilt as players move around
+  - Attendance: whoever is standing at the screen is reported back to
+    FiveRoster and gets a view record against the presentation, so an in-game
+    briefing counts towards their training record. Only the presenter's client
+    reports, and it sends server IDs the game server resolves itself. Turn it
+    off with `Config.Presentations.attendance.enabled = false`
+  - `IsPresenting`, `GetActiveCast`, `StopPresenting` and
+    `OpenPresentationPicker` client exports; `GetActiveCasts`, `IsPresenting`
+    and `StopPresenting` server exports
+  - A cast ends when the presenter stops it, disconnects, or the resource
+    restarts; FiveRoster closes anything left idle
+  - Instances without the casting routes are detected and the commands say so
+
+### Changed
+- **The tablet's loading indicator is quieter.** The three spinning rings, the
+  pulsing logo and the animated dots are replaced by a static mark and one thin
+  sweep, and it holds still for players who have asked their system for reduced
+  motion
+
 ## [1.3.0] - 2026-09-03
 
 ### Added

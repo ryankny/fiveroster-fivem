@@ -4,7 +4,7 @@ game 'gta5'
 name 'fiveroster'
 author 'FiveRoster'
 description 'Official FiveRoster integration for FiveM - In-game roster management and shift tracking'
-version '1.3.0'
+version '1.4.0'
 repository 'https://github.com/FiveRoster/fiveroster-fivem'
 
 lua54 'yes'
@@ -14,12 +14,16 @@ shared_scripts {
 }
 
 client_scripts {
-    'client/main.lua'
+    'client/main.lua',
+    'client/cast.lua'
 }
 
+-- server/cast.lua reads a handful of helpers main.lua hands it, so it must
+-- load after main.lua.
 server_scripts {
     'server/config.lua',
-    'server/main.lua'
+    'server/main.lua',
+    'server/cast.lua'
 }
 
 ui_page 'html/index.html'
@@ -47,7 +51,13 @@ exports {
     'ToggleShiftPause',
     'IsShiftPaused',
     'GetShiftDuration',
-    'IsShiftPauseSupported'
+    'IsShiftPauseSupported',
+
+    -- In-game presentation casting
+    'IsPresenting',
+    'GetActiveCast',
+    'StopPresenting',
+    'OpenPresentationPicker'
 }
 
 server_exports {
@@ -64,5 +74,10 @@ server_exports {
     'IsShiftPauseSupported',
     'GetPlayerRosters',
     'SyncPlayerJob',
-    'GetJobForRank'
+    'GetJobForRank',
+
+    -- In-game presentation casting
+    'GetActiveCasts',
+    'IsPresenting',
+    'StopPresenting'
 }

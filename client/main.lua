@@ -189,6 +189,7 @@ local function OpenNUI(embedUrl)
     if isNUIOpen then return end
 
     isNUIOpen = true
+    FiveRosterTabletOpen = true
     SetNuiFocus(true, true)
     SetNuiFocusKeepInput(false)
 
@@ -207,6 +208,7 @@ local function CloseNUI()
     -- Always release focus even if state is out of sync
     SetNuiFocus(false, false)
     SetNuiFocusKeepInput(false)
+    FiveRosterTabletOpen = false
 
     if not isNUIOpen then return end
 

@@ -23,12 +23,7 @@
                 <div class="tablet-screen">
                     <div id="loading">
                         <img src="https://fiveroster.com/assets/img/fiveroster_icon_colour.png" alt="FiveRoster" class="loading-logo">
-                        <div class="loader">
-                            <div class="loader-ring"></div>
-                            <div class="loader-ring"></div>
-                            <div class="loader-ring"></div>
-                        </div>
-                        <p class="loading-text">Loading<span class="loading-dots"></span></p>
+                        <div class="loader" role="progressbar" aria-label="Loading"></div>
                     </div>
 
                     <iframe id="fiveroster-frame" src="" frameborder="0" referrerpolicy="no-referrer-when-downgrade" allow="clipboard-write; clipboard-read"></iframe>
@@ -44,6 +39,21 @@
             </div>
         </div>
     </div>
+
+    <div id="picker" class="hidden">
+        <div class="picker-panel">
+            <div class="picker-head">
+                <div>
+                    <span class="picker-eyebrow">Cast to</span>
+                    <h2 id="picker-screen">Nearby screen</h2>
+                </div>
+                <button id="picker-close" type="button" aria-label="Close">&times;</button>
+            </div>
+            <ul id="picker-list"></ul>
+            <p class="picker-hint">Once the deck is up, the arrow keys change slide and Backspace ends it.</p>
+        </div>
+    </div>
+
     <script src="script.js"></script>
 </body>
 </html>
