@@ -9,6 +9,7 @@ Official FiveRoster integration for FiveM servers. Allows players to access rost
 - **In-Game Tablet UI** - Beautiful, immersive tablet interface with animations
 - **Shift Tracking** - Players can start and end shifts directly in-game
 - **Shift Breaks** - Pause and resume a shift without ending it; break time is deducted from recorded hours
+- **Training Presentations on In-Game Screens** - Cast a FiveRoster training deck onto a TV and click through it in game; attendance is recorded back to FiveRoster
 - **Auto Shift End** - Automatically ends shifts when players disconnect
 - **Rank-to-Job Sync** - Automatically sync FiveRoster ranks to in-game jobs (ESX/QBCore/QBox)
 - **Multi-Guild Support** - Connect multiple Discord servers (PD, EMS, Fire, etc.)
@@ -129,10 +130,14 @@ Players will automatically see rosters from **all** Discord servers they are a m
 | `/shiftpause` | Start a break on your active shift |
 | `/shiftresume` | End your break and start the clock again |
 | `/shiftbreak` | Toggle the break on/off |
+| `/present` | Cast a training presentation onto the screen you are standing at |
+| `/endpresentation` | Stop the presentation you are casting |
 
 Break command names are configurable under `Config.ShiftPause`, along with an
 optional keybind for the toggle. They are hidden automatically when the
 FiveRoster instance does not support breaks.
+
+Presentation command names are configurable under `Config.Presentations`.
 
 ## Multi-Guild Setup
 
@@ -242,6 +247,98 @@ hidden from then on. Everything else keeps working.
 states: hidden when off duty, green **ON DUTY** with a ticking duration, and
 amber **ON BREAK** with the duration frozen. It is off by default so it does not
 collide with an existing server HUD.
+
+## Training Presentations on In-Game Screens
+
+Run a briefing without anyone leaving the server. A presenter stands in front of
+a screen, picks one of their roster's FiveRoster training presentations, and the
+deck appears on that screen for everybody nearby. The presenter clicks through
+it with the arrow keys.
+
+### Running a briefing
+
+1. Stand within `castDistance` (4m by default) of a configured screen.
+2. Run `/present`. A picker lists the presentations you can cast.
+3. Choose one. It goes up on the screen for everyone within `viewDistance`.
+4. **Left / Right arrow** change slide. **Backspace** ends the cast.
+
+The server owns the slide index, so everybody watching sees the same slide, and
+a player who walks in halfway through joins on the slide that is showing. Only
+the presenter can move the deck.
+
+### Which decks appear in the picker
+
+Presentations belonging to a roster the presenter is on, where that roster has
+training enabled on FiveRoster, and where the deck has at least one slide. Every
+check happens on the FiveRoster side against the presenter's Discord account, so
+a modified client cannot cast a deck its owner is not entitled to.
+
+### Configuring screens
+
+Screens are ordinary GTA props that carry a **named render target**. Any prop of
+a model listed in `Config.Presentations.screenModels` becomes castable:
+
+```lua
+screenModels = {
+    { model = 'prop_tv_flat_01', renderTarget = 'tvscreen' },
+    { model = 'prop_tv_flat_03', renderTarget = 'tvscreen' },
+}
+```
+
+`tvscreen` is the render target name on every vanilla TV. A streamed prop uses
+whatever name its author gave it.
+
+For a briefing room with no TV in the map, have this resource place one:
+
+```lua
+fixedScreens = {
+    { label = 'PD Briefing Room',
+      model  = 'prop_tv_flat_01',
+      renderTarget = 'tvscreen',
+      coords = vector3(447.51, -974.14, 30.69),
+      heading = 90.0 },
+}
+```
+
+> **Important:** the game links a render target to a **model**, not to one prop.
+> Every prop of that model on screen shows the cast. If your map has that TV
+> everywhere, give your briefing screen its own model — a streamed prop, or one
+> of the less common vanilla TV models — and list only that one.
+
+`Config.Presentations.maxScreens` (2 by default) caps how many screens are drawn
+at once. Each one is a browser surface, so raising it costs client performance.
+
+### Attendance
+
+While a cast runs, whoever is standing within `attendance.distance` of the
+screen is reported back to FiveRoster. Those players get a view record against
+the presentation, so an in-game briefing shows up in the presentation analytics
+alongside portal views and counts towards the watcher's training record.
+
+Only the presenter's client reports, and it sends server IDs — the game server
+resolves those to Discord accounts itself, so nobody can be marked as having
+attended a briefing they were not standing in.
+
+Time is credited per slide when the deck moves, and only to watchers reported at
+the screen in the last two minutes, so somebody who walks out after slide two is
+not recorded as having sat through the rest. Each slide change credits at most
+60 seconds, so a screen left running overnight books a minute a slide rather
+than eight hours.
+
+Set `Config.Presentations.attendance.enabled = false` to cast without recording
+anyone.
+
+### When casting stops
+
+A cast ends when the presenter stops it, disconnects, or the resource restarts.
+FiveRoster also closes any cast that goes idle for 30 minutes, so a briefing
+nobody ended does not stay open.
+
+### Requirements
+
+Needs a FiveRoster instance that exposes the casting routes. An older instance
+answers them with a 404, which is detected on the first attempt; the commands
+then say so rather than failing silently.
 
 ## Rank-to-Job Synchronization
 
@@ -545,6 +642,38 @@ local worked = exports['fiveroster']:GetShiftDuration()
 local canPause = exports['fiveroster']:IsShiftPauseSupported()
 ```
 
+#### Presentation Casting (Client)
+
+```lua
+-- Is this player currently casting a presentation?
+local presenting = exports['fiveroster']:IsPresenting()
+
+-- The cast this player is driving, or nil.
+-- { castUuid, screenKey, name, castUrl, currentSlide, slideCount, presenter }
+local cast = exports['fiveroster']:GetActiveCast()
+
+-- Stop casting. Returns false when the player was not presenting.
+exports['fiveroster']:StopPresenting()
+
+-- Open the picker at the nearest screen, e.g. from your own interaction menu.
+exports['fiveroster']:OpenPresentationPicker()
+```
+
+#### Presentation Casting (Server)
+
+```lua
+-- Every cast running right now, keyed by screen key.
+local casts = exports['fiveroster']:GetActiveCasts()
+
+for screenKey, cast in pairs(casts) do
+    print(cast.name, cast.currentSlide + 1, 'of', cast.slideCount)
+end
+
+-- Is a given player presenting, and stop them if so.
+local presenting = exports['fiveroster']:IsPresenting(source)
+exports['fiveroster']:StopPresenting(source)
+```
+
 ## Events
 
 FiveRoster triggers events that other resources can listen to.
@@ -739,6 +868,29 @@ Players must be enrolled in at least one roster:
 1. Check that the resource started without errors
 2. Verify `Config.UseTablet = true` in config.lua
 3. Check the F8 console for errors
+
+### Presentation does not appear on the screen
+
+- Is the prop's model listed in `Config.Presentations.screenModels`, with the
+  right `renderTarget` name? `tvscreen` is correct for vanilla TVs.
+- Are you within `viewDistance` of it? Nothing is drawn beyond that range.
+- Turn on `Config.Debug.enabled` and look for `[FiveRoster:Cast]` lines. "Render
+  target did not resolve" means the model has no render target by that name.
+
+### The presentation shows on every TV in the building
+
+Expected: the game links a render target to a **model**, not to one prop. Give
+your briefing screen its own model and list only that one in `screenModels`.
+
+### `/present` says there is no screen nearby
+
+You must be within `castDistance` (4m by default) of a prop whose model is in
+`screenModels`, or of one of your `fixedScreens`.
+
+### The picker is empty
+
+The presenter must be on a roster that has training enabled on FiveRoster, and
+that roster must have at least one presentation with at least one slide.
 
 ### Debug Mode
 

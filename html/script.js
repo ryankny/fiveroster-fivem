@@ -343,4 +343,140 @@
     document.addEventListener('contextmenu', function(e) {
         e.preventDefault();
     });
+
+    // ========================================================================
+    // PRESENTATION PICKER
+    // ========================================================================
+    // Shown when a player casts a training presentation onto a screen in the
+    // world. It is its own overlay, not part of the tablet: a player at a
+    // briefing screen has not opened the tablet at all.
+
+    const picker = document.getElementById('picker');
+    const pickerList = document.getElementById('picker-list');
+    const pickerScreen = document.getElementById('picker-screen');
+    const pickerCloseBtn = document.getElementById('picker-close');
+
+    let pickerOpen = false;
+
+    function closePicker(notifyLua) {
+        if (!pickerOpen) return;
+        pickerOpen = false;
+        picker.classList.add('hidden');
+        pickerList.innerHTML = '';
+
+        if (notifyLua) {
+            fetch('https://fiveroster-fivem/closePicker', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            }).catch(function() {});
+        }
+    }
+
+    function castPresentation(uuid) {
+        // Close first: the deck goes up on the screen, and the player needs
+        // their controls back to drive it.
+        closePicker(false);
+
+        fetch('https://fiveroster-fivem/castPresentation', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ presentation_uuid: uuid })
+        }).catch(function() {});
+    }
+
+    function buildPickerItem(presentation) {
+        const item = document.createElement('li');
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'picker-item';
+
+        const label = document.createElement('span');
+
+        const name = document.createElement('span');
+        name.className = 'picker-name';
+        name.textContent = presentation.name || 'Untitled presentation';
+        label.appendChild(name);
+
+        // The roster is what tells two similarly named decks apart, so it is
+        // shown whenever the backend sent one.
+        if (presentation.roster_name) {
+            const meta = document.createElement('span');
+            meta.className = 'picker-meta';
+            meta.textContent = presentation.roster_name;
+            label.appendChild(meta);
+        }
+
+        const count = document.createElement('span');
+        count.className = 'picker-count';
+        const slides = Number(presentation.slide_count) || 0;
+        count.textContent = slides === 1 ? '1 slide' : slides + ' slides';
+
+        button.appendChild(label);
+        button.appendChild(count);
+        button.addEventListener('click', function() {
+            castPresentation(presentation.presentation_uuid);
+        });
+
+        item.appendChild(button);
+        return item;
+    }
+
+    function openPicker(presentations, screenLabel) {
+        pickerScreen.textContent = screenLabel || 'Nearby screen';
+        pickerList.innerHTML = '';
+
+        if (!Array.isArray(presentations) || presentations.length === 0) {
+            const empty = document.createElement('li');
+            empty.className = 'picker-empty';
+            empty.textContent = 'No presentations available to cast.';
+            pickerList.appendChild(empty);
+        } else {
+            presentations.forEach(function(presentation) {
+                pickerList.appendChild(buildPickerItem(presentation));
+            });
+        }
+
+        pickerOpen = true;
+        picker.classList.remove('hidden');
+
+        const first = pickerList.querySelector('.picker-item');
+        if (first) first.focus();
+    }
+
+    if (pickerCloseBtn) {
+        pickerCloseBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            closePicker(true);
+        });
+    }
+
+    // Clicking the backdrop dismisses, the same as the tablet.
+    picker.addEventListener('click', function(e) {
+        if (e.target === picker) closePicker(true);
+    });
+
+    // ESC while the picker is up closes the picker, not the tablet behind it.
+    window.addEventListener('keydown', function(event) {
+        if ((event.key === 'Escape' || event.keyCode === 27) && pickerOpen) {
+            event.preventDefault();
+            event.stopPropagation();
+            closePicker(true);
+        }
+    }, true);
+
+    window.addEventListener('message', function(event) {
+        const data = event.data;
+        if (!data) return;
+
+        switch (data.action) {
+            case 'openPicker':
+                openPicker(data.presentations, data.screenLabel);
+                break;
+
+            case 'closePicker':
+                closePicker(false);
+                break;
+        }
+    });
 })();
