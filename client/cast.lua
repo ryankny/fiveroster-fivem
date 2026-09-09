@@ -34,6 +34,7 @@ local PresentationDefaults = {
     command = 'present',
     stopCommand = 'endpresentation',
     debugCommand = 'screeninfo',
+    adjustCommand = 'castfit',
     commandKey = '',
     nextKey = 175,
     prevKey = 174,
@@ -45,6 +46,27 @@ local PresentationDefaults = {
 }
 
 local ResolutionDefault = { width = 1280, height = 720 }
+
+-- Offered in order by the live adjuster, so a screen whose panel is not 16:9
+-- can be matched without editing the config first.
+local ResolutionPresets = {
+    { width = 1920, height = 1080 },
+    { width = 1600, height = 900 },
+    { width = 1280, height = 720 },
+    { width = 1024, height = 576 },
+    { width = 854, height = 480 },
+    { width = 640, height = 360 },
+    { width = 1024, height = 768 },
+    { width = 800, height = 600 },
+    { width = 1024, height = 1024 },
+    { width = 512, height = 512 }
+}
+
+-- How the browser surface is laid onto the render target. The game gives no
+-- way to ask a render target its shape, so a panel that is not the shape of
+-- the page ends up stretched or cropped and only the person looking at it can
+-- say by how much. These are the numbers /castfit writes.
+local DisplayDefault = { scaleX = 1.0, scaleY = 1.0, offsetX = 0.0, offsetY = 0.0 }
 
 -- Every vanilla prop worth trying as a screen. A model only becomes castable
 -- once a render target actually links to it, so an entry the game does not
@@ -139,6 +161,7 @@ local function Resolution()
     }
 end
 
+
 -- A screen entry is addressed by a name that must be identical on every
 -- client, because it goes into the screen key. Normally that is the model
 -- name. A prop whose name nobody knows can be configured as a raw hash
@@ -166,7 +189,9 @@ local function NormaliseScreenEntry(entry)
         label = entry.label,
         coords = entry.coords,
         heading = entry.heading,
-        renderTarget = entry.renderTarget
+        renderTarget = entry.renderTarget,
+        resolution = entry.resolution,
+        display = entry.display
     }
 end
 
@@ -242,6 +267,68 @@ local function ModelHashFor(modelName)
     if literal then return tonumber(literal) end
 
     return GetHashKey(modelName)
+end
+
+-- Live adjustments, by model name. Held only for this session: /castfit prints
+-- what to paste into config.lua rather than writing anything, because a client
+-- cannot write to the server's config and a screen everybody sees should not be
+-- reshaped permanently by whoever last presented at it.
+local displayOverrides = {}
+
+local function ConfiguredEntryFor(modelName)
+    for _, entry in ipairs(FixedScreens()) do
+        if entry.model == modelName then return entry end
+    end
+
+    for _, entry in ipairs(ScreenModels()) do
+        if entry.model == modelName then return entry end
+    end
+
+    return nil
+end
+
+-- The resolution the browser surface for a screen is built at. Per model
+-- first, then the global setting.
+local function ResolutionFor(modelName)
+    local override = displayOverrides[modelName]
+    if override and override.width and override.height then
+        return { width = override.width, height = override.height }
+    end
+
+    local entry = ConfiguredEntryFor(modelName)
+    local configured = entry and entry.resolution
+
+    if configured and tonumber(configured.width) and tonumber(configured.height) then
+        return { width = tonumber(configured.width), height = tonumber(configured.height) }
+    end
+
+    return Resolution()
+end
+
+-- How that surface is drawn onto the panel, global then per model then live.
+local function DisplayFor(modelName)
+    local display = {
+        scaleX = DisplayDefault.scaleX,
+        scaleY = DisplayDefault.scaleY,
+        offsetX = DisplayDefault.offsetX,
+        offsetY = DisplayDefault.offsetY
+    }
+
+    local function apply(source)
+        if type(source) ~= 'table' then return end
+        for key in pairs(display) do
+            local value = tonumber(source[key])
+            if value then display[key] = value end
+        end
+    end
+
+    apply(Config.Presentations and Config.Presentations.display)
+
+    local entry = ConfiguredEntryFor(modelName)
+    apply(entry and entry.display)
+    apply(displayOverrides[modelName])
+
+    return display
 end
 
 local function AttendanceSetting(key, default)
@@ -419,25 +506,78 @@ end)
 -- BROWSER SURFACES
 -- ============================================================================
 
-local function AcquireSurface(screenKey, url)
+-- Declared ahead of AcquireSurface, which gives a surface back when a screen
+-- asks for a resolution the one it holds was not built at.
+local ReleaseSurface
+
+-- A DUI's resolution is fixed when it is created, so a surface can only be
+-- handed to a screen that wants the same one. A free surface of the wrong size
+-- is destroyed and rebuilt rather than stretched, which is the whole point of
+-- letting a screen choose its own resolution.
+local function BuildSurface(index, url, resolution)
+    local txdName = ('fiveroster_cast_%d_%dx%d'):format(index, resolution.width, resolution.height)
+
+    local dui = CreateDui(url, resolution.width, resolution.height)
+    if not dui then return nil end
+
+    local txd = CreateRuntimeTxd(txdName)
+    CreateRuntimeTextureFromDuiHandle(txd, 'screen', GetDuiHandle(dui))
+
+    return {
+        dui = dui,
+        txd = txd,
+        txdName = txdName,
+        txnName = 'screen',
+        width = resolution.width,
+        height = resolution.height
+    }
+end
+
+local function AcquireSurface(screenKey, url, resolution)
+    resolution = resolution or Resolution()
+
     local existing = surfacesByScreen[screenKey]
     if existing then
-        if existing.url ~= url then
-            SetDuiUrl(existing.dui, url)
-            existing.url = url
+        -- The presenter changed the resolution under a live cast. Rebuild
+        -- rather than carry on at the old size.
+        if existing.width ~= resolution.width or existing.height ~= resolution.height then
+            ReleaseSurface(screenKey)
+        else
+            if existing.url ~= url then
+                SetDuiUrl(existing.dui, url)
+                existing.url = url
+            end
+            return existing
         end
-        return existing
+    end
+
+    local function claim(surface)
+        surface.screenKey = screenKey
+        surface.url = url
+        surface.syncedSlide = nil
+        SetDuiUrl(surface.dui, url)
+        surfacesByScreen[screenKey] = surface
+        return surface
     end
 
     -- Reuse a surface nothing is showing on before building another one.
     for _, surface in ipairs(surfacePool) do
+        if not surface.screenKey and surface.width == resolution.width and surface.height == resolution.height then
+            return claim(surface)
+        end
+    end
+
+    -- Nothing free at this size. Rebuild a free one rather than grow the pool.
+    for index, surface in ipairs(surfacePool) do
         if not surface.screenKey then
-            surface.screenKey = screenKey
-            surface.url = url
-            surface.syncedSlide = nil
-            SetDuiUrl(surface.dui, url)
-            surfacesByScreen[screenKey] = surface
-            return surface
+            DestroyDui(surface.dui)
+            local rebuilt = BuildSurface(index, url, resolution)
+            if not rebuilt then
+                table.remove(surfacePool, index)
+                return nil
+            end
+            surfacePool[index] = rebuilt
+            return claim(rebuilt)
         end
     end
 
@@ -447,34 +587,17 @@ local function AcquireSurface(screenKey, url)
         return nil
     end
 
-    local resolution = Resolution()
     local index = #surfacePool + 1
-    local txdName = ('fiveroster_cast_%d'):format(index)
-
-    local dui = CreateDui(url, resolution.width, resolution.height)
-    if not dui then return nil end
-
-    local txd = CreateRuntimeTxd(txdName)
-    CreateRuntimeTextureFromDuiHandle(txd, 'screen', GetDuiHandle(dui))
-
-    local surface = {
-        dui = dui,
-        txd = txd,
-        txdName = txdName,
-        txnName = 'screen',
-        url = url,
-        screenKey = screenKey
-    }
+    local surface = BuildSurface(index, url, resolution)
+    if not surface then return nil end
 
     surfacePool[index] = surface
-    surfacesByScreen[screenKey] = surface
+    CastDebug('Created browser surface %s for %s', surface.txdName, screenKey)
 
-    CastDebug('Created browser surface %s for %s', txdName, screenKey)
-
-    return surface
+    return claim(surface)
 end
 
-local function ReleaseSurface(screenKey)
+function ReleaseSurface(screenKey)
     local surface = surfacesByScreen[screenKey]
     if not surface then return end
 
@@ -555,14 +678,80 @@ local function AcquireRenderTarget(name, modelName)
     return renderId
 end
 
-local function ReleaseRenderTargets()
-    for name in pairs(activeRenderTargets) do
-        if IsNamedRendertargetRegistered(name) then
-            ReleaseNamedRendertarget(name)
+-- Releasing a named render target does not repaint the panel: whatever was
+-- drawn last stays on it, so ending a briefing left the final slide sitting on
+-- the TV forever. The target has to be painted over while it is still held.
+-- Black is what an off TV looks like, and is the only thing we can put there —
+-- the game does not hand back whatever the panel showed before it was linked.
+local BlankFrames = 4
+
+-- Render target name -> frames of black still owed before it is released.
+local blankingRenderTargets = {}
+
+local function ScheduleBlank(name)
+    if not name then return end
+    if not activeRenderTargets[name] then return end
+    blankingRenderTargets[name] = BlankFrames
+end
+
+-- Every render target name a cast still needs, so a screen going dark does not
+-- blank another briefing that happens to share its model.
+local function RenderTargetsInUse()
+    local inUse = {}
+
+    for _, cast in pairs(casts) do
+        if cast.screen then
+            local name = RenderTargetFor(cast.screen.model)
+            if name then inUse[name] = true end
         end
     end
 
+    return inUse
+end
+
+local function ReleaseRenderTarget(name)
+    if IsNamedRendertargetRegistered(name) then
+        ReleaseNamedRendertarget(name)
+    end
+
+    activeRenderTargets[name] = nil
+    blankingRenderTargets[name] = nil
+end
+
+local function ReleaseRenderTargets()
+    for name in pairs(activeRenderTargets) do
+        ReleaseRenderTarget(name)
+    end
+
     activeRenderTargets = {}
+    blankingRenderTargets = {}
+end
+
+-- Paint the black frames that are owed, then let the target go. Called from the
+-- render loop, which is the only place with frames to spend.
+local function DrawBlanking()
+    if next(blankingRenderTargets) == nil then return false end
+
+    local inUse = RenderTargetsInUse()
+
+    for name, remaining in pairs(blankingRenderTargets) do
+        local target = activeRenderTargets[name]
+
+        if inUse[name] or not target then
+            -- A new cast claimed the screen back, or it is already gone.
+            blankingRenderTargets[name] = nil
+        elseif remaining <= 0 then
+            ReleaseRenderTarget(name)
+        else
+            SetTextRenderId(target.renderId)
+            SetScriptGfxDrawOrder(4)
+            DrawRect(0.5, 0.5, 1.0, 1.0, 0, 0, 0, 255)
+            SetTextRenderId(GetDefaultScriptRendertargetRenderId())
+            blankingRenderTargets[name] = remaining - 1
+        end
+    end
+
+    return next(blankingRenderTargets) ~= nil
 end
 
 -- ============================================================================
@@ -753,8 +942,17 @@ end
 local function ClearCast(screenKey)
     if type(screenKey) ~= 'string' then return end
 
+    local cast = casts[screenKey]
+
     casts[screenKey] = nil
     ReleaseSurface(screenKey)
+
+    -- Wipe the panel before the render target goes, or the last slide stays on
+    -- the TV. Removed from `casts` first, so a screen still showing another
+    -- briefing on the same model keeps it.
+    if cast and cast.screen then
+        ScheduleBlank(RenderTargetFor(cast.screen.model))
+    end
 
     if presentingScreenKey == screenKey then
         presentingScreenKey = nil
@@ -821,16 +1019,30 @@ local function DrawCast(screenKey, cast)
     local renderTarget = RenderTargetFor(screen.model)
     if not renderTarget then return false end
 
-    local surface = AcquireSurface(screenKey, cast.castUrl)
+    local surface = AcquireSurface(screenKey, cast.castUrl, ResolutionFor(screen.model))
     if not surface then return false end
 
     local renderId = AcquireRenderTarget(renderTarget, screen.model)
     if not renderId then return false end
 
+    local display = DisplayFor(screen.model)
+
     SetTextRenderId(renderId)
     SetScriptGfxDrawOrder(4)
     if DrawBehindPawnMenu then DrawBehindPawnMenu(true) end
-    DrawSprite(surface.txdName, surface.txnName, 0.5, 0.5, 1.0, 1.0, 0.0, 255, 255, 255, 255)
+
+    -- Anything the page does not cover is black rather than whatever the panel
+    -- last held, so shrinking the image reads as letterboxing and not as a
+    -- half-cleared screen.
+    if display.scaleX < 1.0 or display.scaleY < 1.0 or display.offsetX ~= 0.0 or display.offsetY ~= 0.0 then
+        DrawRect(0.5, 0.5, 1.0, 1.0, 0, 0, 0, 255)
+    end
+
+    DrawSprite(surface.txdName, surface.txnName,
+        0.5 + display.offsetX, 0.5 + display.offsetY,
+        display.scaleX, display.scaleY,
+        0.0, 255, 255, 255, 255)
+
     if DrawBehindPawnMenu then DrawBehindPawnMenu(false) end
     SetTextRenderId(GetDefaultScriptRendertargetRenderId())
 
@@ -880,12 +1092,21 @@ CreateThread(function()
             end
         end
 
+        -- Screens that have just stopped get their black frames whether or not
+        -- anything else is being drawn, since that is the only thing standing
+        -- between the presenter and a slide left on the wall.
+        local stillBlanking = DrawBlanking()
+
         if #inRange == 0 then
-            -- Nothing to draw: idle cheaply rather than spinning on every frame.
-            if next(activeRenderTargets) ~= nil then
-                ReleaseRenderTargets()
+            if stillBlanking then
+                Wait(0)
+            else
+                -- Nothing to draw: idle cheaply rather than spinning every frame.
+                if next(activeRenderTargets) ~= nil then
+                    ReleaseRenderTargets()
+                end
+                Wait(500)
             end
-            Wait(500)
         else
             for _, entry in ipairs(inRange) do
                 DrawCast(entry.key, entry.cast)
@@ -922,6 +1143,10 @@ end)
 -- PRESENTER CONTROLS
 -- ============================================================================
 
+-- Set by /castfit. Declared here because the deck controls below have to stand
+-- down while the adjuster has the arrow keys.
+local adjusting = false
+
 CreateThread(function()
     if not IsCastingEnabled() then return end
 
@@ -930,7 +1155,9 @@ CreateThread(function()
     local stopKey = tonumber(Setting('stopKey')) or PresentationDefaults.stopKey
 
     while true do
-        if presentingScreenKey and not pickerOpen then
+        -- The adjuster borrows the same keys, so stepping the deck is suspended
+        -- while it is open rather than doing both at once.
+        if presentingScreenKey and not pickerOpen and not adjusting then
             local cast = casts[presentingScreenKey]
 
             if cast then
@@ -950,13 +1177,151 @@ CreateThread(function()
     end
 end)
 
+-- ============================================================================
+-- FITTING A SCREEN
+-- ============================================================================
+-- A render target's shape is baked into the model and the game will not report
+-- it, so a panel that is not the shape of the page comes out stretched or
+-- cropped and no amount of guessing from here will fix it. The presenter can
+-- see the screen, so they adjust it: /castfit takes over the arrow keys, and
+-- leaving it prints the config to keep.
+
+local AdjustStep = 0.02
+local AdjustControls = {
+    left = 174, right = 175, up = 172, down = 173,
+    stretch = 21,      -- Left Shift: arrows resize instead of moving
+    resolution = 246,  -- Y: next resolution preset
+    reset = 182,       -- L: back to the configured values
+    done = 177         -- Backspace: finish
+}
+
+local function AdjustedModel()
+    local cast = presentingScreenKey and casts[presentingScreenKey]
+    return cast and cast.screen and cast.screen.model or nil
+end
+
+-- Overrides start from whatever the screen is showing now, so entering the
+-- adjuster never moves the image.
+local function BeginAdjust(modelName)
+    if displayOverrides[modelName] then return end
+
+    local display = DisplayFor(modelName)
+    local resolution = ResolutionFor(modelName)
+
+    displayOverrides[modelName] = {
+        scaleX = display.scaleX, scaleY = display.scaleY,
+        offsetX = display.offsetX, offsetY = display.offsetY,
+        width = resolution.width, height = resolution.height
+    }
+end
+
+local function NextResolution(override)
+    local current = 0
+
+    for index, preset in ipairs(ResolutionPresets) do
+        if preset.width == override.width and preset.height == override.height then
+            current = index
+            break
+        end
+    end
+
+    local preset = ResolutionPresets[(current % #ResolutionPresets) + 1]
+    override.width, override.height = preset.width, preset.height
+end
+
+-- What to paste into config.lua. Printed rather than saved: a client cannot
+-- write the server's config, and a screen everyone can see should not be
+-- reshaped for good by whoever presented at it last.
+local function PrintAdjustment(modelName, override)
+    local literal = modelName:match('^#(-?%d+)$') and modelName:sub(2) or ("'" .. modelName .. "'")
+
+    print('^5[FiveRoster]^7 Screen settings. Put this in Config.Presentations.screenModels:')
+    print(('  { model = %s,'):format(literal))
+    print(('      resolution = { width = %d, height = %d },'):format(override.width, override.height))
+    print(('      display = { scaleX = %.3f, scaleY = %.3f, offsetX = %.3f, offsetY = %.3f } },')
+        :format(override.scaleX, override.scaleY, override.offsetX, override.offsetY))
+    print('^3[FiveRoster]^7 Filling in screenModels replaces the built-in list, so keep the models you still want.')
+end
+
+local function DrawAdjustHint(override)
+    local text = ('FITTING  %dx%d  scale %.2f x %.2f  offset %.2f, %.2f   [Arrows] move   [Shift+Arrows] stretch   [Y] resolution   [L] reset   [Backspace] done')
+        :format(override.width, override.height, override.scaleX, override.scaleY, override.offsetX, override.offsetY)
+
+    SetTextFont(4)
+    SetTextScale(0.32, 0.32)
+    SetTextColour(120, 220, 255, 230)
+    SetTextOutline()
+    SetTextCentre(true)
+    SetTextEntry('STRING')
+    AddTextComponentSubstringPlayerName(text)
+    DrawText(0.5, 0.89)
+end
+
+CreateThread(function()
+    if not IsCastingEnabled() then return end
+
+    while true do
+        local modelName = adjusting and AdjustedModel() or nil
+
+        if not modelName then
+            adjusting = false
+            Wait(300)
+        else
+            local override = displayOverrides[modelName]
+
+            if not override then
+                adjusting = false
+            else
+                local stretching = IsControlPressed(0, AdjustControls.stretch)
+
+                if IsControlPressed(0, AdjustControls.left) then
+                    if stretching then override.scaleX = math.max(0.05, override.scaleX - AdjustStep)
+                    else override.offsetX = override.offsetX - AdjustStep end
+                elseif IsControlPressed(0, AdjustControls.right) then
+                    if stretching then override.scaleX = math.min(4.0, override.scaleX + AdjustStep)
+                    else override.offsetX = override.offsetX + AdjustStep end
+                end
+
+                if IsControlPressed(0, AdjustControls.up) then
+                    if stretching then override.scaleY = math.min(4.0, override.scaleY + AdjustStep)
+                    else override.offsetY = override.offsetY - AdjustStep end
+                elseif IsControlPressed(0, AdjustControls.down) then
+                    if stretching then override.scaleY = math.max(0.05, override.scaleY - AdjustStep)
+                    else override.offsetY = override.offsetY + AdjustStep end
+                end
+
+                if IsControlJustPressed(0, AdjustControls.resolution) then
+                    NextResolution(override)
+                end
+
+                if IsControlJustPressed(0, AdjustControls.reset) then
+                    displayOverrides[modelName] = nil
+                    BeginAdjust(modelName)
+                    override = displayOverrides[modelName]
+                end
+
+                if IsControlJustPressed(0, AdjustControls.done) then
+                    adjusting = false
+                    PrintAdjustment(modelName, override)
+                    Notify('Screen settings printed to the console (F8).', 'success')
+                else
+                    DrawAdjustHint(override)
+                end
+            end
+
+            Wait(0)
+        end
+    end
+end)
+
 -- The presenter's on-screen reminder of the controls and where they are in the
 -- deck. Only the presenter sees it; everyone else just watches the screen.
 local function DrawPresenterHint(cast)
-    local text = ('%s   %d / %d   [Left/Right] change slide   [Backspace] end'):format(
+    local text = ('%s   %d / %d   [Left/Right] change slide   [Backspace] end   /%s to fit the screen'):format(
         cast.name or 'Presentation',
         (cast.currentSlide or 0) + 1,
-        math.max(cast.slideCount or 1, 1)
+        math.max(cast.slideCount or 1, 1),
+        tostring(Setting('adjustCommand'))
     )
 
     SetTextFont(4)
@@ -1225,6 +1590,26 @@ end
 CreateThread(function()
     if not IsCastingEnabled() then return end
 
+    local adjustCommand = Setting('adjustCommand')
+    if type(adjustCommand) == 'string' and adjustCommand ~= '' then
+        RegisterCommand(adjustCommand, function()
+            local modelName = AdjustedModel()
+
+            if not modelName then
+                Notify(CastMessage('not_presenting'), 'error')
+                return
+            end
+
+            if adjusting then
+                adjusting = false
+                return
+            end
+
+            BeginAdjust(modelName)
+            adjusting = true
+        end, false)
+    end
+
     local debugCommand = Setting('debugCommand')
     if type(debugCommand) == 'string' and debugCommand ~= '' then
         RegisterCommand(debugCommand, function()
@@ -1275,6 +1660,21 @@ AddEventHandler('onResourceStop', function(resourceName)
 
     ClosePicker()
     DestroyAllSurfaces()
+
+    -- Same reason as ending a cast: a released render target keeps its last
+    -- frame, so restarting the resource would otherwise leave a slide on every
+    -- screen it had been drawing to.
+    for name in pairs(activeRenderTargets) do
+        blankingRenderTargets[name] = BlankFrames
+    end
+
+    casts = {}
+
+    for _ = 1, BlankFrames + 1 do
+        if not DrawBlanking() then break end
+        Wait(0)
+    end
+
     ReleaseRenderTargets()
     RemoveFixedScreens()
 end)

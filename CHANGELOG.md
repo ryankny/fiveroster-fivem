@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     is now largely discounted, and `castDistance` defaults to 6.0 rather than
     4.0
 
+- **Ending a presentation left the last slide on the screen.** Releasing a
+  named render target does not repaint the panel, so the deck stayed on the TV
+  until the map reloaded. The panel is now painted black while the target is
+  still held, and only then released. Restarting the resource clears its screens
+  the same way. A screen still showing another briefing on the same model is
+  left alone
 - **A failed cast now says why.** `Could not start that presentation` was all
   anyone got, whether the API key was wrong, FiveRoster was unreachable or the
   instance was too old. The status code, the URL and what the instance replied
@@ -38,6 +44,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a cast that failed with nothing to show for it
 
 ### Added
+- **`/castfit`.** A deck cast to a panel that is not its shape came out cropped
+  or stretched, and nothing in the resource could tell: the shape of a render
+  target is baked into the model and the game will not report it. The presenter
+  can see the screen, so they reframe it live with the arrow keys and it prints
+  the settings to keep. Adjustments are per model and last for the session only
+- Screens take their own `resolution` and `display` (scale and offset), set per
+  model in `screenModels` or globally under `Config.Presentations.display`.
+  Browser surfaces are pooled per resolution, so two screens of different shapes
+  no longer share one
 - **`/screeninfo`.** Prints every prop around you to the client console (F8) and
   says, one by one, why each is or is not castable. A TV the resource does not
   know is reported with its model hash in the form `screenModels` accepts, since
