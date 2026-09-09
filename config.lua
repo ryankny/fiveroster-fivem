@@ -327,6 +327,12 @@ Config.Presentations = {
     -- never heard of so you can paste it straight into screenModels below.
     debugCommand = 'screeninfo',
 
+    -- Run this while presenting to reframe the screen you are casting to.
+    -- Arrow keys move the image, Shift and the arrows stretch it, Y steps
+    -- through resolutions, L resets, Backspace finishes and prints the
+    -- settings to the client console (F8) to paste into screenModels below.
+    adjustCommand = 'castfit',
+
     -- Register a keybind for the picker (players rebind it in
     -- Settings > Key Bindings > FiveM). Leave empty for no default key.
     commandKey = '',
@@ -348,8 +354,25 @@ Config.Presentations = {
     viewDistance = 20.0,
 
     -- Resolution of the browser surface drawn onto the screen. Higher is
-    -- sharper and more expensive; 1280x720 suits every vanilla TV model.
+    -- sharper and more expensive. A panel that is not 16:9 wants its own
+    -- resolution, which is set per model in screenModels rather than here.
     resolution = { width = 1280, height = 720 },
+
+    --[[
+        FRAMING
+        How the page is laid onto the panel. The shape of a render target is
+        baked into the model and the game will not report it, so a panel that
+        is not the shape of the page comes out stretched or cropped and only
+        the person looking at it can say by how much.
+
+        Rather than guess, cast to the screen and run /castfit. It prints the
+        numbers to paste back here, or into a single model's entry in
+        screenModels, which takes precedence over this.
+
+        scaleX / scaleY  1.0 fills the panel. Below 1.0 leaves a black border.
+        offsetX/offsetY  Shifts the image. 0.0 is centred.
+    ]]
+    display = { scaleX = 1.0, scaleY = 1.0, offsetX = 0.0, offsetY = 0.0 },
 
     -- How many screens a single client will draw at once. Each one is a
     -- browser surface, so raising this costs client performance. When more
@@ -391,6 +414,12 @@ Config.Presentations = {
         what /screeninfo prints:
             { model = -1234567890 },
             { model = 'my_streamed_tv', renderTarget = 'my_rt' },
+
+        A screen whose panel is the wrong shape for the deck takes its own
+        resolution and framing, which is what /castfit prints:
+            { model = 'prop_monitor_01a',
+              resolution = { width = 1024, height = 768 },
+              display = { scaleX = 1.0, scaleY = 0.94, offsetX = 0.0, offsetY = 0.0 } },
     ]]
     screenModels = {
         -- Empty = use the built-in list of vanilla screens.
