@@ -33,11 +33,12 @@ local PresentationDefaults = {
     enabled = true,
     command = 'present',
     stopCommand = 'endpresentation',
+    debugCommand = 'screeninfo',
     commandKey = '',
     nextKey = 175,
     prevKey = 174,
     stopKey = 177,
-    castDistance = 4.0,
+    castDistance = 6.0,
     viewDistance = 20.0,
     showSlideCounter = true,
     maxScreens = 2
@@ -45,15 +46,71 @@ local PresentationDefaults = {
 
 local ResolutionDefault = { width = 1280, height = 720 }
 
+-- Every vanilla prop worth trying as a screen. A model only becomes castable
+-- once a render target actually links to it, so an entry the game does not
+-- have, or one whose shader carries no render target, costs nothing but is
+-- never offered. That makes a broad list safe: guessing wrong is silent.
+--
+-- No render target name is given here on purpose. It is probed per model at
+-- discovery time against RenderTargetNameDefaults, so a model added later
+-- needs nothing but its name.
 local ScreenModelDefaults = {
-    { model = 'prop_tv_flat_01', renderTarget = 'tvscreen' },
-    { model = 'prop_tv_flat_02', renderTarget = 'tvscreen' },
-    { model = 'prop_tv_flat_03', renderTarget = 'tvscreen' },
-    { model = 'prop_tv_flat_01b', renderTarget = 'tvscreen' }
+    -- Flatscreen TVs. The four the resource has always supported come first.
+    { model = 'prop_tv_flat_01' },
+    { model = 'prop_tv_flat_01b' },
+    { model = 'prop_tv_flat_02' },
+    { model = 'prop_tv_flat_03' },
+    { model = 'prop_tv_flat_03b' },
+    { model = 'prop_tv_flat_michael' },
+
+    -- Older and set-dressing TVs.
+    { model = 'prop_tv_01' },
+    { model = 'prop_tv_02' },
+    { model = 'prop_tv_03' },
+    { model = 'prop_tv_04' },
+    { model = 'prop_tv_05' },
+    { model = 'prop_tv_06' },
+    { model = 'prop_tv_07' },
+    { model = 'prop_tv_08' },
+    { model = 'prop_tv_09' },
+    { model = 'prop_tv_10' },
+    { model = 'prop_tv_stand' },
+    { model = 'prop_cs_tv_stand' },
+    { model = 'prop_trailer_tv' },
+
+    -- Interior TVs from the safehouses and clubhouses.
+    { model = 'v_res_tt_tv' },
+    { model = 'v_res_j_tv' },
+    { model = 'v_res_m_tv' },
+    { model = 'v_club_officetv' },
+    { model = 'v_res_d_tv' },
+
+    -- Monitors and office screens, for briefing rooms built out of desks.
+    { model = 'prop_monitor_01a' },
+    { model = 'prop_monitor_01b' },
+    { model = 'prop_monitor_01c' },
+    { model = 'prop_monitor_01d' },
+    { model = 'prop_monitor_02' },
+    { model = 'prop_monitor_03' },
+    { model = 'prop_monitor_w_large' },
+    { model = 'hei_prop_hei_monitor_01a' },
+    { model = 'prop_laptop_01a' },
+    { model = 'prop_laptop_lester' },
+    { model = 'prop_laptop_lester2' },
+
+    -- Projector screens and boards.
+    { model = 'prop_cs_project_screen_01' },
+    { model = 'prop_projector_01' },
+    { model = 'prop_flatscreen_overlay' }
 }
 
+-- Render target names tried against a model, in order, until one links. Every
+-- vanilla TV uses 'tvscreen'; a streamed prop uses whatever name its author
+-- baked in, which goes in Config.Presentations.renderTargetNames.
+local RenderTargetNameDefaults = { 'tvscreen' }
+
 local MessageDefaults = {
-    no_screen = 'Stand in front of a screen to cast a presentation.',
+    no_screen = 'No castable screen here. Run /screeninfo to see what is nearby.',
     no_presentations = 'You have no training presentations to cast.',
     cast_stopped = 'Presentation ended.',
     cast_failed = 'Could not start that presentation.',
@@ -82,16 +139,109 @@ local function Resolution()
     }
 end
 
+-- A screen entry is addressed by a name that must be identical on every
+-- client, because it goes into the screen key. Normally that is the model
+-- name. A prop whose name nobody knows can be configured as a raw hash
+-- instead, and is then addressed as '#<hash>'.
+local function NormaliseScreenEntry(entry)
+    if type(entry) ~= 'table' then return nil end
+
+    local model, hash = entry.model, nil
+
+    if type(model) == 'string' and model ~= '' then
+        hash = GetHashKey(model)
+    elseif type(model) == 'number' then
+        hash = model
+        model = ('#%d'):format(hash)
+    elseif type(entry.hash) == 'number' then
+        hash = entry.hash
+        model = ('#%d'):format(hash)
+    else
+        return nil
+    end
+
+    return {
+        model = model,
+        hash = hash,
+        label = entry.label,
+        coords = entry.coords,
+        heading = entry.heading,
+        renderTarget = entry.renderTarget
+    }
+end
+
+local function NormaliseScreenEntries(list)
+    local out = {}
+    for _, entry in ipairs(list) do
+        local normalised = NormaliseScreenEntry(entry)
+        if normalised then out[#out + 1] = normalised end
+    end
+    return out
+end
+
+local screenModelCache, screenModelSource = nil, nil
+
 local function ScreenModels()
     local configured = Config.Presentations and Config.Presentations.screenModels
-    if type(configured) == 'table' and #configured > 0 then return configured end
-    return ScreenModelDefaults
+    local source = (type(configured) == 'table' and #configured > 0) and configured or ScreenModelDefaults
+
+    -- Normalising every call would hash a few dozen strings on every discovery
+    -- sweep, so the result is kept until the config table itself changes.
+    if screenModelSource ~= source then
+        screenModelCache = NormaliseScreenEntries(source)
+        screenModelSource = source
+    end
+
+    return screenModelCache
 end
+
+-- Model hash -> entry, for turning a prop found in the world back into a
+-- configured screen.
+local screenModelIndex, screenModelIndexSource = nil, nil
+
+local function ScreenModelIndex()
+    local models = ScreenModels()
+
+    if screenModelIndexSource ~= models then
+        screenModelIndex = {}
+        for _, entry in ipairs(models) do
+            screenModelIndex[entry.hash] = entry
+        end
+        screenModelIndexSource = models
+    end
+
+    return screenModelIndex
+end
+
+local function RenderTargetNames()
+    local configured = Config.Presentations and Config.Presentations.renderTargetNames
+    if type(configured) == 'table' and #configured > 0 then return configured end
+    return RenderTargetNameDefaults
+end
+
+local fixedScreenCache, fixedScreenSource = nil, nil
 
 local function FixedScreens()
     local configured = Config.Presentations and Config.Presentations.fixedScreens
-    if type(configured) == 'table' then return configured end
-    return {}
+    if type(configured) ~= 'table' then return {} end
+
+    if fixedScreenSource ~= configured then
+        fixedScreenCache = NormaliseScreenEntries(configured)
+        fixedScreenSource = configured
+    end
+
+    return fixedScreenCache
+end
+
+-- The hash for a model name as it appears in a screen key, including the
+-- '#<hash>' form used for props configured by hash.
+local function ModelHashFor(modelName)
+    if type(modelName) ~= 'string' then return nil end
+
+    local literal = modelName:match('^#(-?%d+)$')
+    if literal then return tonumber(literal) end
+
+    return GetHashKey(modelName)
 end
 
 local function AttendanceSetting(key, default)
@@ -138,19 +288,78 @@ local function ParseScreenKey(key)
     }
 end
 
--- The render target baked into a given model, from config.
-local function RenderTargetFor(modelName)
-    for _, entry in ipairs(ScreenModels()) do
-        if entry.model == modelName then
-            return entry.renderTarget or 'tvscreen'
+-- The render target name a model was configured with, if any.
+local function ConfiguredRenderTargetFor(modelName)
+    for _, entry in ipairs(FixedScreens()) do
+        if entry.model == modelName and entry.renderTarget then
+            return entry.renderTarget
         end
     end
 
-    for _, entry in ipairs(FixedScreens()) do
-        if entry.model == modelName then
-            return entry.renderTarget or 'tvscreen'
+    for _, entry in ipairs(ScreenModels()) do
+        if entry.model == modelName and entry.renderTarget then
+            return entry.renderTarget
         end
     end
+
+    return nil
+end
+
+-- Model name -> render target name, or false once a model has been shown not
+-- to carry one. Probing costs a register and a link, so it is done once.
+local probedRenderTargets = {}
+
+-- Whether a render target name links to a model. The game refuses the link
+-- unless the model's shader actually references that name, which is the only
+-- way to ask a model what render target it carries.
+local function RenderTargetLinks(name, modelHash)
+    local registeredHere = false
+
+    if not IsNamedRendertargetRegistered(name) then
+        RegisterNamedRendertarget(name, false)
+        registeredHere = true
+    end
+
+    if not IsNamedRendertargetLinked(modelHash) then
+        LinkNamedRendertarget(modelHash)
+    end
+
+    if IsNamedRendertargetLinked(modelHash) then return true end
+
+    -- Nothing else is using this name, so leave the slot as it was found.
+    if registeredHere then ReleaseNamedRendertarget(name) end
+
+    return false
+end
+
+-- The render target baked into a given model. A configured name is trusted
+-- and used as-is; anything else is probed against the candidate names.
+local function RenderTargetFor(modelName)
+    local configured = ConfiguredRenderTargetFor(modelName)
+    if configured then return configured end
+
+    local cached = probedRenderTargets[modelName]
+    if cached ~= nil then
+        if cached == false then return nil end
+        return cached
+    end
+
+    local modelHash = ModelHashFor(modelName)
+    if not modelHash or not IsModelInCdimage(modelHash) then
+        probedRenderTargets[modelName] = false
+        return nil
+    end
+
+    for _, name in ipairs(RenderTargetNames()) do
+        if RenderTargetLinks(name, modelHash) then
+            probedRenderTargets[modelName] = name
+            CastDebug('Model %s carries render target %s', modelName, name)
+            return name
+        end
+    end
+
+    probedRenderTargets[modelName] = false
+    CastDebug('Model %s carries none of the known render targets', modelName)
 
     return nil
 end
@@ -316,8 +525,8 @@ local function AcquireRenderTarget(name, modelName)
         return existing.renderId
     end
 
-    local modelHash = GetHashKey(modelName)
-    if not IsModelInCdimage(modelHash) then
+    local modelHash = ModelHashFor(modelName)
+    if not modelHash or not IsModelInCdimage(modelHash) then
         CastDebug('Model %s is not in the game files, cannot cast to it', modelName)
         return nil
     end
@@ -360,59 +569,137 @@ end
 -- SCREEN DISCOVERY
 -- ============================================================================
 
--- The nearest castable screen to a position, or nil. Fixed screens win ties:
--- they were placed deliberately, so a stray TV nearby should not shadow one.
-local function FindNearestScreen(coords, radius)
-    local best, bestDistance = nil, radius + 1.0
+-- How far a ped standing at `coords` is from a screen prop. A wall-mounted TV
+-- reports its origin at the centre of the panel, well above head height, so
+-- the raw distance between two points punishes a player who is squarely in
+-- front of a screen mounted high. The vertical gap is discounted to the part
+-- that is genuinely out of reach, which keeps a briefing-room TV castable from
+-- where you would actually stand to present.
+local VerticalAllowance = 2.5
 
+local function ScreenDistance(coords, screenCoords)
+    local flat = #(vector2(coords.x, coords.y) - vector2(screenCoords.x, screenCoords.y))
+    local vertical = math.abs(coords.z - screenCoords.z) - VerticalAllowance
+
+    if vertical <= 0.0 then return flat end
+
+    return math.sqrt((flat * flat) + (vertical * vertical))
+end
+
+-- A prop is only a screen if a render target actually links to its model.
+-- Checking here rather than at cast time means a listed model the game has no
+-- render target for is never offered, so the picker cannot open onto a screen
+-- that would then fail to draw.
+local function ScreenFromEntry(entry, screenCoords, distance)
+    local renderTarget = entry.renderTarget or RenderTargetFor(entry.model)
+    if not renderTarget then return nil end
+
+    return {
+        model = entry.model,
+        coords = screenCoords,
+        label = entry.label,
+        renderTarget = renderTarget,
+        distance = distance
+    }
+end
+
+-- Every castable prop within `radius`, nearest first.
+--
+-- Three passes, because no single one of them sees everything. The object pool
+-- holds props the engine has spawned, which is most of them but not props
+-- baked into an interior. GetClosestObjectOfType reaches some of those, and
+-- only ever returns one prop per model. Whatever the player is actually
+-- looking at is picked up by the aim probe even when it sits outside the
+-- radius the other two searched.
+local function ScreensInRange(coords, radius)
+    local found, seen = {}, {}
+
+    local function consider(entry, screenCoords)
+        local distance = ScreenDistance(coords, screenCoords)
+        if distance > radius then return end
+
+        local key = ScreenKey(entry.model, screenCoords)
+        if seen[key] then return end
+
+        local screen = ScreenFromEntry(entry, screenCoords, distance)
+        if not screen then return end
+
+        screen.key = key
+        seen[key] = true
+        found[#found + 1] = screen
+    end
+
+    -- Fixed screens first, so a deliberately placed briefing screen wins a tie
+    -- against a stray TV that happens to be the same distance away.
     for _, entry in ipairs(FixedScreens()) do
-        if entry.model and entry.coords then
-            local distance = #(coords - entry.coords)
-            if distance <= radius and distance < bestDistance then
-                best = {
-                    model = entry.model,
-                    coords = entry.coords,
-                    label = entry.label,
-                    renderTarget = entry.renderTarget or 'tvscreen'
-                }
-                bestDistance = distance
-            end
+        if entry.coords then consider(entry, entry.coords) end
+    end
+
+    local index = ScreenModelIndex()
+
+    for _, object in ipairs(GetGamePool('CObject')) do
+        if DoesEntityExist(object) then
+            local entry = index[GetEntityModel(object)]
+            if entry then consider(entry, GetEntityCoords(object)) end
         end
     end
 
     for _, entry in ipairs(ScreenModels()) do
-        local modelHash = GetHashKey(entry.model)
-        local object = GetClosestObjectOfType(coords.x, coords.y, coords.z, radius, modelHash, false, false, false)
-
+        local object = GetClosestObjectOfType(coords.x, coords.y, coords.z, radius, entry.hash, false, false, false)
         if object ~= 0 and DoesEntityExist(object) then
-            local objectCoords = GetEntityCoords(object)
-            local distance = #(coords - objectCoords)
-
-            if distance <= radius and distance < bestDistance then
-                best = {
-                    model = entry.model,
-                    coords = objectCoords,
-                    label = entry.label,
-                    renderTarget = entry.renderTarget or 'tvscreen'
-                }
-                bestDistance = distance
-            end
+            consider(entry, GetEntityCoords(object))
         end
     end
 
-    if not best then return nil end
+    table.sort(found, function(a, b) return a.distance < b.distance end)
 
-    best.key = ScreenKey(best.model, best.coords)
-    best.distance = bestDistance
+    return found
+end
 
-    return best
+-- The screen the player is aiming at, if it is one. Standing in front of a TV
+-- and looking at it is the clearest statement of intent there is, so it is
+-- honoured out to a longer reach than the proximity search uses.
+local function CameraDirection()
+    local rotation = GetGameplayCamRot(2)
+    local pitch, yaw = math.rad(rotation.x), math.rad(rotation.z)
+    local level = math.abs(math.cos(pitch))
+
+    return vector3(-math.sin(yaw) * level, math.cos(yaw) * level, math.sin(pitch))
+end
+
+local function ScreenUnderAim(reach)
+    local camera = GetGameplayCamCoord()
+    local target = camera + (CameraDirection() * reach)
+    local handle = StartShapeTestRay(camera.x, camera.y, camera.z, target.x, target.y, target.z, 16, PlayerPedId(), 4)
+    local _, hit, _, _, entity = GetShapeTestResult(handle)
+
+    if hit == 0 or not entity or entity == 0 or not DoesEntityExist(entity) then return nil end
+
+    local entry = ScreenModelIndex()[GetEntityModel(entity)]
+    if not entry then return nil end
+
+    local screenCoords = GetEntityCoords(entity)
+    local screen = ScreenFromEntry(entry, screenCoords, ScreenDistance(GetEntityCoords(PlayerPedId()), screenCoords))
+    if not screen then return nil end
+
+    screen.key = ScreenKey(screen.model, screenCoords)
+
+    return screen
+end
+
+-- The nearest castable screen to a position, or nil.
+local function FindNearestScreen(coords, radius)
+    local nearby = ScreensInRange(coords, radius)
+    if nearby[1] then return nearby[1] end
+
+    return ScreenUnderAim(radius * 2.0)
 end
 
 -- Spawn the screens this resource owns.
 local function SpawnFixedScreens()
     for _, entry in ipairs(FixedScreens()) do
         if entry.model and entry.coords then
-            local modelHash = GetHashKey(entry.model)
+            local modelHash = entry.hash
 
             RequestModel(modelHash)
             local attempts = 0
@@ -834,11 +1121,116 @@ RegisterNUICallback('closePicker', function(_, cb)
 end)
 
 -- ============================================================================
+-- DIAGNOSTICS
+-- ============================================================================
+
+-- Lists what is around the player and says, prop by prop, why it is or is not
+-- castable. A TV that is not on the model list is the usual reason /present
+-- reports no screen, and the game will not tell you a prop's model name, only
+-- its hash — so the hash is printed in the form config accepts directly.
+local function ReportNearbyScreens()
+    local ped = PlayerPedId()
+    local coords = GetEntityCoords(ped)
+    local radius = 15.0
+    local index = ScreenModelIndex()
+
+    local aimed = nil
+    do
+        local camera = GetGameplayCamCoord()
+        local target = camera + (CameraDirection() * 25.0)
+        local handle = StartShapeTestRay(camera.x, camera.y, camera.z, target.x, target.y, target.z, 16, ped, 4)
+        local _, hit, _, _, entity = GetShapeTestResult(handle)
+        if hit ~= 0 and entity and entity ~= 0 and DoesEntityExist(entity) then aimed = entity end
+    end
+
+    local rows, seen = {}, {}
+
+    local function add(object)
+        if seen[object] or not DoesEntityExist(object) then return end
+        seen[object] = true
+
+        local objectCoords = GetEntityCoords(object)
+        rows[#rows + 1] = {
+            hash = GetEntityModel(object),
+            distance = ScreenDistance(coords, objectCoords),
+            aimed = object == aimed
+        }
+    end
+
+    if aimed then add(aimed) end
+
+    for _, object in ipairs(GetGamePool('CObject')) do
+        if ScreenDistance(coords, GetEntityCoords(object)) <= radius then add(object) end
+    end
+
+    table.sort(rows, function(a, b)
+        if a.aimed ~= b.aimed then return a.aimed end
+        return a.distance < b.distance
+    end)
+
+    -- Probing an unknown model registers and releases a render target, which
+    -- would disturb a cast that is already running.
+    local casting = next(activeRenderTargets) ~= nil
+
+    print(('^5[FiveRoster]^7 %d prop(s) within %.1fm. Nearest first; the one you are looking at is marked.'):format(#rows, radius))
+    if casting then
+        print('^3[FiveRoster]^7 A cast is running, so unlisted models are not probed. Run this again once it has ended.')
+    end
+
+    local castable = 0
+
+    for position, row in ipairs(rows) do
+        if position > 20 then break end
+
+        local entry = index[row.hash]
+        local name = entry and entry.model or ('#%d'):format(row.hash)
+        local marker = row.aimed and ' <- looking at this' or ''
+        local verdict
+
+        if entry then
+            local renderTarget = RenderTargetFor(entry.model)
+            if renderTarget then
+                castable = castable + 1
+                verdict = ('castable, render target "%s"'):format(renderTarget)
+            else
+                verdict = 'listed as a screen, but no render target links to it'
+            end
+        elseif casting then
+            verdict = 'not on the screen list'
+        else
+            local renderTarget = RenderTargetFor(name)
+            if renderTarget then
+                verdict = ('NOT on the screen list, but render target "%s" links. Add { model = %d } to Config.Presentations.screenModels'):format(renderTarget, row.hash)
+            else
+                verdict = 'not a screen'
+            end
+        end
+
+        print(('  %5.1fm  %-32s %s%s'):format(row.distance, name, verdict, marker))
+    end
+
+    if #rows > 20 then
+        print(('  ... and %d more, not shown.'):format(#rows - 20))
+    end
+
+    print(('^5[FiveRoster]^7 %d castable screen(s) in range. /present reaches %.1fm.'):format(castable, tonumber(Setting('castDistance')) or PresentationDefaults.castDistance))
+
+    Notify(('Screen report printed to the console (F8). %d castable screen(s) nearby.'):format(castable), castable > 0 and 'success' or 'error')
+end
+
+-- ============================================================================
 -- COMMANDS
 -- ============================================================================
 
 CreateThread(function()
     if not IsCastingEnabled() then return end
+
+    local debugCommand = Setting('debugCommand')
+    if type(debugCommand) == 'string' and debugCommand ~= '' then
+        RegisterCommand(debugCommand, function()
+            ReportNearbyScreens()
+        end, false)
+    end
 
     local command = Setting('command')
     if type(command) == 'string' and command ~= '' then
