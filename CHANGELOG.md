@@ -5,6 +5,40 @@ All notable changes to FiveRoster for FiveM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **`/present` no longer reports no screen while you are stood at a TV.** Three
+  separate things narrowed it to almost nothing:
+  - Only four TV models were castable. Every vanilla TV, monitor, projector
+    screen and laptop is now recognised out of the box, so
+    `Config.Presentations.screenModels` is empty by default and most servers
+    never need to touch it
+  - Screens were found with one closest-prop lookup per model, which does not
+    see props baked into an interior and only ever returns one prop per model.
+    The object pool is swept as well, and whatever you are looking at is picked
+    up by an aim probe out to twice the cast distance
+  - Distance was measured from the player's feet to the centre of the panel, so
+    a TV mounted above head height read as further away than it looked. Height
+    is now largely discounted, and `castDistance` defaults to 6.0 rather than
+    4.0
+
+### Added
+- **`/screeninfo`.** Prints every prop around you to the client console (F8) and
+  says, one by one, why each is or is not castable. A TV the resource does not
+  know is reported with its model hash in the form `screenModels` accepts, since
+  the game will not give up a prop's model name
+- Render target names are worked out per model by probing
+  `Config.Presentations.renderTargetNames` (`tvscreen` by default), so a screen
+  needs nothing but its model name. Naming one explicitly still overrides the
+  result
+- Screens can be configured by raw model hash, for a prop whose name is unknown
+
+### Changed
+- A prop is only offered as a screen once a render target actually links to its
+  model. The picker can no longer open onto a screen that would then fail to
+  draw
+
 ## [1.4.0] - 2026-09-06
 
 ### Added
