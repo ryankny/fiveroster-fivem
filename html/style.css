@@ -218,18 +218,6 @@ body {
     transition: opacity 0.4s ease-out, visibility 0.4s ease-out;
 }
 
-.loading-logo {
-    width: 80px;
-    height: auto;
-    margin-bottom: 30px;
-    animation: logoPulse 2s ease-in-out infinite;
-}
-
-@keyframes logoPulse {
-    0%, 100% { opacity: 0.7; transform: scale(1); }
-    50% { opacity: 1; transform: scale(1.05); }
-}
-
 #loading.hidden {
     opacity: 0;
     visibility: hidden;
@@ -237,71 +225,50 @@ body {
     z-index: -1;
 }
 
+/* The loading state is deliberately quiet: the tablet is already an animated
+   object arriving on screen, and a spinner on top of that read as busy. A
+   static mark and one thin sweep is enough to say "working". */
+.loading-logo {
+    width: 56px;
+    height: auto;
+    opacity: 0.55;
+    margin-bottom: 22px;
+}
+
 .loader {
     position: relative;
-    width: 100px;
-    height: 100px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    width: 120px;
+    height: 2px;
+    border-radius: 1px;
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
 }
 
-.loader-ring {
-    position: absolute;
-    border-radius: 50%;
-    border: 3px solid transparent;
-    animation: ringPulse 2s ease-in-out infinite;
-}
-
-/* FiveRoster yellow/gold colors */
-.loader-ring:nth-child(1) {
-    width: 100%;
-    height: 100%;
-    border-top-color: #F5C518;
-    border-right-color: #F5C518;
-}
-
-.loader-ring:nth-child(2) {
-    width: 80%;
-    height: 80%;
-    border-top-color: #FFD54F;
-    border-left-color: #FFD54F;
-    animation-delay: 0.15s;
-    animation-direction: reverse;
-}
-
-.loader-ring:nth-child(3) {
-    width: 60%;
-    height: 60%;
-    border-bottom-color: #FFC107;
-    border-right-color: #FFC107;
-    animation-delay: 0.3s;
-}
-
-@keyframes ringPulse {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
-}
-
-.loading-text {
-    color: rgba(255, 255, 255, 0.8);
-    margin-top: 25px;
-    font-size: 16px;
-    font-weight: 500;
-    letter-spacing: 0.5px;
-}
-
-.loading-dots::after {
+.loader::after {
     content: '';
-    animation: dots 1.5s steps(4, end) infinite;
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    width: 40%;
+    border-radius: 1px;
+    background: rgba(245, 197, 24, 0.85);
+    animation: loaderSweep 1.4s ease-in-out infinite;
 }
 
-@keyframes dots {
-    0% { content: ''; }
-    25% { content: '.'; }
-    50% { content: '..'; }
-    75% { content: '...'; }
-    100% { content: ''; }
+@keyframes loaderSweep {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(250%); }
+}
+
+/* Respect a player who has asked their system for less motion: the bar holds
+   steady rather than sweeping. */
+@media (prefers-reduced-motion: reduce) {
+    .loader::after {
+        animation: none;
+        width: 100%;
+        opacity: 0.5;
+    }
 }
 
 #fiveroster-frame {
@@ -372,7 +339,7 @@ body {
     }
 
     .loading-logo {
-        width: 60px;
+        width: 48px;
     }
 }
 
@@ -382,17 +349,155 @@ body {
     }
 
     .loader {
-        width: 70px;
-        height: 70px;
-    }
-
-    .loading-text {
-        font-size: 14px;
-        margin-top: 20px;
+        width: 90px;
     }
 
     .loading-logo {
-        width: 50px;
-        margin-bottom: 20px;
+        width: 44px;
+        margin-bottom: 16px;
     }
+}
+
+/* ============================================================================
+   PRESENTATION PICKER
+   ============================================================================
+   Shown when a player casts a training presentation onto a screen in the world.
+   It is not the tablet: it appears on its own, over the game, and closes as
+   soon as a deck is chosen. */
+
+#picker {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.55);
+    animation: fadeIn 0.25s ease-out;
+    z-index: 10000;
+}
+
+.picker-panel {
+    width: min(520px, 80vw);
+    max-height: 72vh;
+    display: flex;
+    flex-direction: column;
+    background: #141414;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+    overflow: hidden;
+    animation: pickerIn 0.25s cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+@keyframes pickerIn {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.picker-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 18px 20px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.picker-eyebrow {
+    display: block;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.4);
+}
+
+.picker-head h2 {
+    margin-top: 3px;
+    font-size: 16px;
+    font-weight: 600;
+    color: #f2f2f2;
+}
+
+#picker-close {
+    background: transparent;
+    border: none;
+    color: rgba(255, 255, 255, 0.45);
+    font-size: 24px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 4px;
+    transition: color 0.15s;
+}
+
+#picker-close:hover {
+    color: #fff;
+}
+
+#picker-list {
+    list-style: none;
+    overflow-y: auto;
+    padding: 8px;
+    margin: 0;
+}
+
+#picker-list li + li {
+    margin-top: 4px;
+}
+
+.picker-item {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    text-align: left;
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 11px 12px;
+    color: #e6e6e6;
+    font-family: inherit;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.picker-item:hover,
+.picker-item:focus-visible {
+    background: rgba(245, 197, 24, 0.1);
+    outline: none;
+}
+
+.picker-item .picker-name {
+    font-weight: 600;
+}
+
+.picker-item .picker-meta {
+    display: block;
+    margin-top: 2px;
+    font-size: 12px;
+    font-weight: 400;
+    color: rgba(255, 255, 255, 0.45);
+}
+
+.picker-item .picker-count {
+    flex-shrink: 0;
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.4);
+    font-variant-numeric: tabular-nums;
+}
+
+.picker-empty {
+    padding: 26px 20px;
+    text-align: center;
+    font-size: 14px;
+    color: rgba(255, 255, 255, 0.45);
+}
+
+.picker-hint {
+    padding: 12px 20px 16px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.4);
 }
