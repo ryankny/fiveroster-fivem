@@ -132,6 +132,7 @@ Players will automatically see rosters from **all** Discord servers they are a m
 | `/shiftbreak` | Toggle the break on/off |
 | `/present` | Cast a training presentation onto the screen you are standing at |
 | `/endpresentation` | Stop the presentation you are casting |
+| `/screeninfo` | List the props around you and whether each can be cast to |
 
 Break command names are configurable under `Config.ShiftPause`, along with an
 optional keybind for the toggle. They are hidden automatically when the
@@ -275,18 +276,46 @@ a modified client cannot cast a deck its owner is not entitled to.
 
 ### Configuring screens
 
-Screens are ordinary GTA props that carry a **named render target**. Any prop of
-a model listed in `Config.Presentations.screenModels` becomes castable:
+Screens are ordinary GTA props that carry a **named render target**. Every
+vanilla TV, monitor and projector screen is recognised out of the box, so
+`Config.Presentations.screenModels` is empty by default and most servers never
+need to touch it.
+
+A prop only counts as a screen once a render target actually links to its model,
+which the resource works out by itself. A model that cannot display anything is
+never offered, so `/present` will not open a picker onto a screen that would then
+fail to draw.
+
+#### When `/present` says there is no screen
+
+Stand where you were and run `/screeninfo`. It prints every prop around you to
+the client console (F8) and says, one by one, why each is or is not castable:
+
+```
+  3.0m  prop_tv_flat_02    castable, render target "tvscreen"     <- looking at this
+  1.0m  #-1651888964       NOT on the screen list, but render target "tvscreen"
+                           links. Add { model = -1651888964 } to
+                           Config.Presentations.screenModels
+  0.5m  prop_bin_01a       not a screen
+```
+
+The game will not tell you a prop's model name, only its hash, so the hash is
+printed in the form the config accepts. Filling in `screenModels` **replaces**
+the built-in list rather than adding to it, so include the vanilla models you
+still want:
 
 ```lua
 screenModels = {
-    { model = 'prop_tv_flat_01', renderTarget = 'tvscreen' },
-    { model = 'prop_tv_flat_03', renderTarget = 'tvscreen' },
+    { model = 'prop_tv_flat_01' },
+    { model = -1651888964 },                                  -- from /screeninfo
+    { model = 'my_streamed_tv', renderTarget = 'my_rt' },     -- name known
 }
 ```
 
-`tvscreen` is the render target name on every vanilla TV. A streamed prop uses
-whatever name its author gave it.
+A render target name is optional. Names are tried from
+`Config.Presentations.renderTargetNames` until one links, which is `tvscreen`
+by default. Add your prop's name there and it is found without being listed at
+all.
 
 For a briefing room with no TV in the map, have this resource place one:
 

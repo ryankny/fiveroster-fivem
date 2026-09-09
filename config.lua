@@ -297,12 +297,22 @@ Config.JobSync = {
 
     HOW SCREENS ARE MATCHED
     -----------------------
-    Screens are ordinary GTA props that carry a named render target. The game
-    links a render target to a MODEL, not to one prop, so every prop of that
-    model showing on screen displays the cast at the same time. If your map has
-    many TVs of the same model and you only want one of them to be castable,
-    give the briefing screen its own model (a streamed prop, or one of the
-    less common vanilla models) and list only that model here.
+    Screens are ordinary GTA props that carry a named render target. Every
+    vanilla TV, monitor and projector screen is recognised out of the box, and
+    a prop only counts as a screen once a render target actually links to it,
+    so a model that cannot display anything is never offered.
+
+    If /present says there is no screen while you are stood at a TV, run
+    /screeninfo. It prints every prop around you to the client console (F8) and
+    says why each one is or is not castable, including the hash of a TV that is
+    not on the list yet.
+
+    The game links a render target to a MODEL, not to one prop, so every prop
+    of that model showing on screen displays the cast at the same time. If your
+    map has many TVs of the same model and you only want one of them to be
+    castable, give the briefing screen its own model (a streamed prop, or one
+    of the less common vanilla models) and list only that model in
+    screenModels.
 ]]
 Config.Presentations = {
     enabled = true,
@@ -310,6 +320,12 @@ Config.Presentations = {
     -- Commands. /present opens the picker at the nearest screen in range.
     command = 'present',
     stopCommand = 'endpresentation',
+
+    -- Prints every prop around you to the client console (F8) and says, one by
+    -- one, whether it can be cast to. Run this when /present says there is no
+    -- screen: it names the model, or prints the hash of a TV this resource has
+    -- never heard of so you can paste it straight into screenModels below.
+    debugCommand = 'screeninfo',
 
     -- Register a keybind for the picker (players rebind it in
     -- Settings > Key Bindings > FiveM). Leave empty for no default key.
@@ -322,7 +338,10 @@ Config.Presentations = {
     stopKey = 177,        -- Backspace    - stop the cast
 
     -- How close the presenter must stand to a screen to start or drive a cast.
-    castDistance = 4.0,
+    -- Height is largely discounted, so a TV mounted above head height is still
+    -- reachable from where you would stand to present at it. Looking straight
+    -- at a screen also counts, out to twice this distance.
+    castDistance = 6.0,
 
     -- How close anyone must be for the deck to be drawn on the screen at all.
     -- Keep this modest: each screen in range costs a browser surface.
@@ -356,16 +375,35 @@ Config.Presentations = {
 
     --[[
         SCREEN MODELS
-        Any prop of one of these models becomes a castable screen. The render
-        target name is baked into the model by the game — 'tvscreen' is correct
-        for every vanilla TV listed below. A streamed prop uses whatever name
-        its author gave the render target.
+        Any prop of one of these models becomes a castable screen.
+
+        LEAVE THIS EMPTY unless you have a screen the resource does not already
+        find. Empty means the built-in list is used, which covers every vanilla
+        TV, monitor and projector screen worth casting to. Filling it in
+        REPLACES that list rather than adding to it.
+
+        You do not need to give a render target name. The name is baked into
+        the model by the game, and the resource works out which one a model
+        carries by trying the names in renderTargetNames below. Give one only
+        to override the result.
+
+        A prop whose model name you do not know can be added by hash, which is
+        what /screeninfo prints:
+            { model = -1234567890 },
+            { model = 'my_streamed_tv', renderTarget = 'my_rt' },
     ]]
     screenModels = {
-        { model = 'prop_tv_flat_01', renderTarget = 'tvscreen' },
-        { model = 'prop_tv_flat_02', renderTarget = 'tvscreen' },
-        { model = 'prop_tv_flat_03', renderTarget = 'tvscreen' },
-        { model = 'prop_tv_flat_01b', renderTarget = 'tvscreen' },
+        -- Empty = use the built-in list of vanilla screens.
+    },
+
+    --[[
+        RENDER TARGET NAMES
+        Tried in order against a model until one links. Every vanilla screen
+        uses 'tvscreen'. Add the name a streamed prop's author baked in if you
+        want it found without listing it above.
+    ]]
+    renderTargetNames = {
+        'tvscreen',
     },
 
     --[[
@@ -386,7 +424,7 @@ Config.Presentations = {
     },
 
     messages = {
-        no_screen = 'Stand in front of a screen to cast a presentation.',
+        no_screen = 'No castable screen here. Run /screeninfo to see what is nearby.',
         no_presentations = 'You have no training presentations to cast.',
         cast_started = 'Casting "%s". Arrow keys change slide, Backspace ends it.',
         cast_stopped = 'Presentation ended.',
