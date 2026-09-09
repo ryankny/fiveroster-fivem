@@ -17,14 +17,35 @@
     ============================================================================
 ]]
 
-local Internal = FiveRosterInternal or {}
+-- Read at call time rather than captured on load. main.lua publishes this
+-- table and the manifest orders it first, but a capture here would turn any
+-- future reordering into unauthenticated requests and a cast that fails with
+-- nothing to show for it.
+local function Internals()
+    return FiveRosterInternal or {}
+end
+
+local warnedMissingInternals = false
+
+local function WarnMissingInternals()
+    if warnedMissingInternals then return end
+    warnedMissingInternals = true
+    print('^1[FiveRoster]^7 server/cast.lua loaded without server/main.lua. Presentation casting will fail until the resource is restarted.')
+end
 
 local function DebugLog(...)
-    if Internal.DebugLog then Internal.DebugLog(...) end
+    local internal = Internals()
+    if internal.DebugLog then internal.DebugLog(...) end
 end
 
 local function ApiHeaders()
-    if Internal.ApiHeaders then return Internal.ApiHeaders() end
+    local internal = Internals()
+    if internal.ApiHeaders then return internal.ApiHeaders() end
+
+    -- Without main.lua there is no API key to send, so every call would come
+    -- back 401 and look like a rejected presentation.
+    WarnMissingInternals()
+
     return {
         ['Content-Type'] = 'application/json',
         ['Accept'] = 'application/json'
@@ -32,14 +53,18 @@ local function ApiHeaders()
 end
 
 local function ResolveDiscordId(source)
-    if Internal.ResolvePlayerDiscordId then
-        return Internal.ResolvePlayerDiscordId(source)
+    local internal = Internals()
+    if internal.ResolvePlayerDiscordId then
+        return internal.ResolvePlayerDiscordId(source)
     end
+
+    WarnMissingInternals()
     return nil
 end
 
 local function DecodeJson(response)
-    if Internal.TryDecodeJson then return Internal.TryDecodeJson(response) end
+    local internal = Internals()
+    if internal.TryDecodeJson then return internal.TryDecodeJson(response) end
     if type(response) ~= 'string' or response == '' then return nil, false end
     local ok, decoded = pcall(json.decode, response)
     if ok and type(decoded) == 'table' then return decoded, true end
@@ -64,7 +89,9 @@ local MessageDefaults = {
     no_presentations = 'You have no training presentations to cast.',
     cast_started = 'Casting "%s". Arrow keys change slide, Backspace ends it.',
     cast_stopped = 'Presentation ended.',
-    cast_failed = 'Could not start that presentation.',
+    cast_failed = 'Could not start that presentation. The reason is in the server console.',
+    cast_unreachable = 'Could not reach FiveRoster. Tell an admin.',
+    cast_denied = 'This server is not authorised to cast presentations.',
     cast_busy = 'That screen is already showing a presentation.',
     not_presenting = 'You are not casting a presentation.',
     unsupported = 'In-game presentations are not available on this FiveRoster instance.'
@@ -149,6 +176,51 @@ end
 
 -- A 404 on a casting route means this instance predates the feature. Any other
 -- failure is transient and must not permanently disable the controls.
+-- A failed cast is exceptional and the message the player gets cannot say much
+-- without leaking instance detail to everyone in earshot, so the reason is
+-- always printed to the server console, debug logging on or not. Losing it was
+-- the difference between "could not start that presentation" and knowing that
+-- the API key is wrong.
+local function ReportApiFailure(what, url, statusCode, response)
+    local detail = ''
+
+    if type(response) == 'string' and response ~= '' then
+        detail = ': ' .. response:gsub('%s+', ' '):sub(1, 300)
+    end
+
+    if statusCode == 0 then
+        print(('^1[FiveRoster]^7 %s could not reach %s. Check Config.FiveRosterURL and that the server can make outbound requests.'):format(what, url))
+        return
+    end
+
+    print(('^1[FiveRoster]^7 %s failed: HTTP %s from %s%s'):format(what, tostring(statusCode), url, detail))
+
+    if statusCode == 401 or statusCode == 403 then
+        print('^3[FiveRoster]^7 That is an authentication failure. Check the API key in server/config.lua.')
+    elseif statusCode == 404 then
+        print('^3[FiveRoster]^7 That route does not exist on this instance. In-game presentations need a newer FiveRoster.')
+    end
+end
+
+-- What to tell the player. An instance that explains itself is quoted, since
+-- it is their own FiveRoster and the wording will mean more than ours; the
+-- reply is kept short and plain so a stray error page cannot land in a
+-- notification.
+local function ApiFailureMessage(statusCode, data)
+    local reported = type(data) == 'table' and (data.error or data.message) or nil
+
+    if type(reported) == 'string' and reported ~= '' and #reported <= 120 and not reported:find('[<>]') then
+        return reported
+    end
+
+    if statusCode == 0 then return CastMessage('cast_unreachable') end
+    if statusCode == 404 then return CastMessage('unsupported') end
+    if statusCode == 401 or statusCode == 403 then return CastMessage('cast_denied') end
+    if type(statusCode) == 'number' and statusCode >= 500 then return CastMessage('cast_unreachable') end
+
+    return CastMessage('cast_failed')
+end
+
 local function NoteSupport(statusCode)
     if statusCode == 404 then
         if castingSupported ~= false then
@@ -169,21 +241,28 @@ local function FetchPresentations(discordId, callback)
         NoteSupport(statusCode)
         DebugLog('api_response', 'Presentations status: %s', tostring(statusCode))
 
+        local data = DecodeJson(response)
+
         if statusCode ~= 200 then
-            callback(false, nil)
+            ReportApiFailure('Listing presentations', url, statusCode, response)
+            callback(false, nil, statusCode, data)
             return
         end
 
-        local data = DecodeJson(response)
         if data and data.success and type(data.presentations) == 'table' then
             callback(true, data.presentations)
-        else
-            callback(false, nil)
+            return
         end
+
+        -- A 200 that does not decode is a proxy or a login page answering in
+        -- FiveRoster's place, which is worth saying out loud.
+        ReportApiFailure('Listing presentations', url, statusCode, response)
+        callback(false, nil, statusCode, data)
     end, 'GET', '', ApiHeaders())
 end
 
 local function StartCastRequest(discordId, presentationUuid, playerName, screenLabel, callback)
+    local url = ApiUrl('/api/v1/fivem/cast')
     local body = {
         discord_id = discordId,
         presentation_uuid = presentationUuid,
@@ -192,21 +271,37 @@ local function StartCastRequest(discordId, presentationUuid, playerName, screenL
         server_identifier = GetConvar('sv_hostname', 'Unknown Server')
     }
 
-    PerformHttpRequest(ApiUrl('/api/v1/fivem/cast'), function(statusCode, response)
+    DebugLog('api_request', 'POST %s (presentation %s)', url, tostring(presentationUuid))
+
+    PerformHttpRequest(url, function(statusCode, response)
         NoteSupport(statusCode)
         DebugLog('api_response', 'Cast start status: %s', tostring(statusCode))
 
+        local data = DecodeJson(response)
+
         if statusCode ~= 200 and statusCode ~= 201 then
-            callback(false, nil)
+            ReportApiFailure('Starting a cast', url, statusCode, response)
+            callback(false, nil, statusCode, data)
             return
         end
 
-        local data = DecodeJson(response)
         if data and data.success and type(data.cast) == 'table' then
-            callback(true, data.cast)
-        else
-            callback(false, nil)
+            local cast = data.cast
+
+            -- A cast with no URL renders as a blank screen, which reads as a
+            -- broken resource rather than a backend that answered oddly.
+            if type(cast.cast_url) ~= 'string' or cast.cast_url == '' then
+                print(('^1[FiveRoster]^7 Starting a cast: %s accepted the request but returned no cast_url.'):format(url))
+                callback(false, nil, statusCode, data)
+                return
+            end
+
+            callback(true, cast)
+            return
         end
+
+        ReportApiFailure('Starting a cast', url, statusCode, response)
+        callback(false, nil, statusCode, data)
     end, 'POST', json.encode(body), ApiHeaders())
 end
 
@@ -284,9 +379,9 @@ RegisterNetEvent('fiveroster:cast:requestPresentations', function()
         return
     end
 
-    FetchPresentations(discordId, function(ok, presentations)
+    FetchPresentations(discordId, function(ok, presentations, statusCode, data)
         if not ok then
-            Notify(src, castingSupported == false and CastMessage('unsupported') or CastMessage('cast_failed'))
+            Notify(src, ApiFailureMessage(statusCode, data))
             return
         end
 
@@ -339,10 +434,10 @@ RegisterNetEvent('fiveroster:cast:start', function(presentationUuid, screenKey, 
 
     local playerName = GetPlayerName(src)
 
-    StartCastRequest(discordId, presentationUuid, playerName, screenLabel, function(ok, cast)
+    StartCastRequest(discordId, presentationUuid, playerName, screenLabel, function(ok, cast, statusCode, data)
         -- The presenter may have dropped while FiveRoster was answering.
         if not ok or not cast then
-            Notify(src, CastMessage('cast_failed'))
+            Notify(src, ApiFailureMessage(statusCode, data))
             return
         end
 
