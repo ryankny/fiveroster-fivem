@@ -133,6 +133,7 @@ Players will automatically see rosters from **all** Discord servers they are a m
 | `/present` | Cast a training presentation onto the screen you are standing at |
 | `/endpresentation` | Stop the presentation you are casting |
 | `/screeninfo` | List the props around you and whether each can be cast to |
+| `/castfit` | Reframe the screen you are casting to, while the cast is running |
 
 Break command names are configurable under `Config.ShiftPause`, along with an
 optional keybind for the toggle. They are hidden automatically when the
@@ -311,6 +312,38 @@ screenModels = {
     { model = 'my_streamed_tv', renderTarget = 'my_rt' },     -- name known
 }
 ```
+
+#### When the slide is cropped, stretched or off-centre
+
+The shape of a render target is baked into the model and the game will not
+report it, so a panel that is not the shape of the deck comes out wrong and
+nothing in the resource can work out by how much. You can see it, so you fix it.
+
+Start the cast, then run `/castfit`:
+
+| Key | Effect |
+|-----|--------|
+| Arrow keys | Move the image |
+| Shift + arrow keys | Stretch it |
+| `Y` | Step through resolutions |
+| `L` | Back to the configured values |
+| `Backspace` | Finish, and print the settings |
+
+The deck stops responding to the arrow keys while you are fitting, and goes back
+to normal when you finish. What it prints goes into that model's entry:
+
+```lua
+screenModels = {
+    { model = 'prop_monitor_01a',
+      resolution = { width = 1024, height = 768 },
+      display = { scaleX = 1.0, scaleY = 0.94, offsetX = 0.0, offsetY = 0.0 } },
+}
+```
+
+Adjustments are per model and last only for your session, since a client cannot
+write the server's config and a screen everybody watches should not be reshaped
+by whoever presented at it last. `Config.Presentations.display` sets a default
+for every screen at once.
 
 #### When the picker opens but the cast will not start
 
