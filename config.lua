@@ -280,3 +280,120 @@ Config.JobSync = {
         -- 'fire-roster-uuid',       -- Then Fire
     }
 }
+
+--[[
+    ============================================================================
+    TRAINING PRESENTATIONS ON IN-GAME SCREENS
+    ============================================================================
+    Cast a FiveRoster training presentation onto a TV or monitor in the world
+    and click through it in game, so a briefing can be run without anyone
+    leaving the server.
+
+    How it works:
+      1. A presenter stands in front of a configured screen and runs /present.
+      2. They pick one of the presentations their roster has on FiveRoster.
+      3. The deck appears on the screen for everyone nearby, and the presenter
+         drives it with the arrow keys.
+
+    HOW SCREENS ARE MATCHED
+    -----------------------
+    Screens are ordinary GTA props that carry a named render target. The game
+    links a render target to a MODEL, not to one prop, so every prop of that
+    model showing on screen displays the cast at the same time. If your map has
+    many TVs of the same model and you only want one of them to be castable,
+    give the briefing screen its own model (a streamed prop, or one of the
+    less common vanilla models) and list only that model here.
+]]
+Config.Presentations = {
+    enabled = true,
+
+    -- Commands. /present opens the picker at the nearest screen in range.
+    command = 'present',
+    stopCommand = 'endpresentation',
+
+    -- Register a keybind for the picker (players rebind it in
+    -- Settings > Key Bindings > FiveM). Leave empty for no default key.
+    commandKey = '',
+
+    -- Controls held by the presenter while a cast is running.
+    -- Control IDs: https://docs.fivem.net/docs/game-references/controls/
+    nextKey = 175,        -- Right arrow  - next slide
+    prevKey = 174,        -- Left arrow   - previous slide
+    stopKey = 177,        -- Backspace    - stop the cast
+
+    -- How close the presenter must stand to a screen to start or drive a cast.
+    castDistance = 4.0,
+
+    -- How close anyone must be for the deck to be drawn on the screen at all.
+    -- Keep this modest: each screen in range costs a browser surface.
+    viewDistance = 20.0,
+
+    -- Resolution of the browser surface drawn onto the screen. Higher is
+    -- sharper and more expensive; 1280x720 suits every vanilla TV model.
+    resolution = { width = 1280, height = 720 },
+
+    -- How many screens a single client will draw at once. Each one is a
+    -- browser surface, so raising this costs client performance. When more
+    -- screens are in range than this allows, the nearest ones win.
+    maxScreens = 2,
+
+    -- Draw the deck name and slide counter along the bottom of the screen.
+    showSlideCounter = true,
+
+    --[[
+        ATTENDANCE
+        Who was standing in front of the screen is reported back to FiveRoster
+        while the cast runs, so an in-game briefing appears in the presentation
+        analytics next to portal views and counts towards the watcher's
+        training record. Set enabled = false to cast without recording anyone.
+    ]]
+    attendance = {
+        enabled = true,
+        distance = 15.0,      -- Players within this range of the screen count
+        interval = 30000,     -- How often attendance is reported (ms)
+        requireLineOfSight = false
+    },
+
+    --[[
+        SCREEN MODELS
+        Any prop of one of these models becomes a castable screen. The render
+        target name is baked into the model by the game — 'tvscreen' is correct
+        for every vanilla TV listed below. A streamed prop uses whatever name
+        its author gave the render target.
+    ]]
+    screenModels = {
+        { model = 'prop_tv_flat_01', renderTarget = 'tvscreen' },
+        { model = 'prop_tv_flat_02', renderTarget = 'tvscreen' },
+        { model = 'prop_tv_flat_03', renderTarget = 'tvscreen' },
+        { model = 'prop_tv_flat_01b', renderTarget = 'tvscreen' },
+    },
+
+    --[[
+        FIXED SCREENS (optional)
+        Screens this resource spawns and owns, for briefing rooms that have no
+        TV in the map. Each entry spawns the prop on resource start and removes
+        it on stop.
+
+        Example:
+        { label = 'PD Briefing Room',
+          model = 'prop_tv_flat_01',
+          renderTarget = 'tvscreen',
+          coords = vector3(447.51, -974.14, 30.69),
+          heading = 90.0 },
+    ]]
+    fixedScreens = {
+        -- Add your own briefing screens here
+    },
+
+    messages = {
+        no_screen = 'Stand in front of a screen to cast a presentation.',
+        no_presentations = 'You have no training presentations to cast.',
+        cast_started = 'Casting "%s". Arrow keys change slide, Backspace ends it.',
+        cast_stopped = 'Presentation ended.',
+        cast_failed = 'Could not start that presentation.',
+        cast_busy = 'That screen is already showing a presentation.',
+        not_presenting = 'You are not casting a presentation.',
+        close_tablet_first = 'Close the tablet before casting a presentation.',
+        unsupported = 'In-game presentations are not available on this FiveRoster instance.'
+    }
+}

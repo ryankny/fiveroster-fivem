@@ -1946,6 +1946,23 @@ RegisterCommand('syncjob', function(source, args)
 end, false)
 
 -- ============================================================================
+-- SHARED INTERNALS
+-- ============================================================================
+-- Everything above is file-local, which is what we want: nothing outside this
+-- resource should reach it. The presentation casting in server/cast.lua does
+-- need a few of these, and Lua locals do not cross files, so they are handed
+-- over on one table that only this resource's own scripts can see.
+
+FiveRosterInternal = {
+    DebugLog = DebugLog,
+    RedactString = RedactString,
+    ApiHeaders = ApiHeaders,
+    GetPrimaryApiKey = GetPrimaryApiKey,
+    ResolvePlayerDiscordId = ResolvePlayerDiscordId,
+    TryDecodeJson = TryDecodeJson
+}
+
+-- ============================================================================
 -- RESOURCE LIFECYCLE
 -- ============================================================================
 
