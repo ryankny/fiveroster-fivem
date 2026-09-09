@@ -312,6 +312,21 @@ screenModels = {
 }
 ```
 
+#### When the picker opens but the cast will not start
+
+`Could not start that presentation` means FiveRoster refused the request. The
+reason is printed to the **server** console, naming the status code, the URL and
+what the instance said:
+
+```
+[FiveRoster] Starting a cast failed: HTTP 401 from https://.../api/v1/fivem/cast: {"error":"invalid api key"}
+[FiveRoster] That is an authentication failure. Check the API key in server/config.lua.
+```
+
+The three usual causes are an API key that is missing or wrong (401 or 403), a
+`Config.FiveRosterURL` the server cannot reach (no status code at all), and a
+FiveRoster older than in-game presentations (404).
+
 A render target name is optional. Names are tried from
 `Config.Presentations.renderTargetNames` until one links, which is `tvscreen`
 by default. Add your prop's name there and it is found without being listed at

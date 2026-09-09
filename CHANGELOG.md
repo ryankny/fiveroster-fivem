@@ -23,6 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     is now largely discounted, and `castDistance` defaults to 6.0 rather than
     4.0
 
+- **A failed cast now says why.** `Could not start that presentation` was all
+  anyone got, whether the API key was wrong, FiveRoster was unreachable or the
+  instance was too old. The status code, the URL and what the instance replied
+  are printed to the server console on every failure, debug logging on or not,
+  and the player-facing message distinguishes an unreachable instance from a
+  refused one. An instance that explains itself is quoted back, as long as the
+  explanation is short and plain
+- A cast that FiveRoster accepts without returning a `cast_url` is refused
+  rather than drawn as a blank screen
+- `server/cast.lua` reads the helpers `server/main.lua` publishes at call time
+  rather than capturing them on load. The manifest already orders the two
+  correctly, but a capture turned any reordering into unauthenticated requests
+  and a cast that failed with nothing to show for it
+
 ### Added
 - **`/screeninfo`.** Prints every prop around you to the client console (F8) and
   says, one by one, why each is or is not castable. A TV the resource does not
