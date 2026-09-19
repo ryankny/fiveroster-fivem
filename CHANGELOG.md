@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Only the first API key was sent, so multi-guild servers could cast one
+  department's decks.** `ServerConfig.APIKeys` lets a community name a key per
+  Discord server, `GetAllApiKeys()` collects them and the startup banner
+  reports "multi-guild mode" — but the shared request headers carried
+  `X-API-KEY` set to the primary key alone. Only the session handshake ever
+  sent the full set. FiveRoster answers the cast list for every guild the
+  request authenticates for, so with one key arriving it correctly returned one
+  department, and the extra departments configured alongside it had nothing to
+  offer. Every configured key now rides along in `X-API-KEYS`; `X-API-KEY`
+  still carries the primary, so a single-guild server behaves exactly as before
+
 - **`/present` no longer reports no screen while you are stood at a TV.** Three
   separate things narrowed it to almost nothing:
   - Only four TV models were castable. Every vanilla TV, monitor, projector

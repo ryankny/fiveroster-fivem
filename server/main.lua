@@ -514,13 +514,34 @@ local activeShifts = {}
 -- break feature answers those routes with an HTML 404 instead of JSON.
 local shiftPauseSupported = nil
 
--- Standard API headers for authenticated calls
+-- Standard API headers for authenticated calls.
+--
+-- Sends EVERY configured key, not just the primary one. ServerConfig.APIKeys
+-- exists so a community whose departments live in separate Discord servers can
+-- name all of them, and the startup banner reports "multi-guild mode" when they
+-- do -- but a key only counts on a request it was actually sent with. Only the
+-- session handshake was sending them all; every other call carried keys[1]
+-- alone, so an endpoint that spans guilds saw a single department. Casting is
+-- the one that shows it: the picker offered the primary department's decks and
+-- silently nothing from the rest.
+--
+-- X-API-KEY keeps the primary key, so a single-guild server -- and any
+-- FiveRoster old enough to read only the singular header -- behaves exactly as
+-- it did before.
 local function ApiHeaders()
-    return {
+    local keys = GetAllApiKeys()
+
+    local headers = {
         ['Content-Type'] = 'application/json',
-        ['X-API-KEY'] = GetPrimaryApiKey(),
+        ['X-API-KEY'] = keys[1],
         ['Accept'] = 'application/json'
     }
+
+    if #keys > 1 then
+        headers['X-API-KEYS'] = table.concat(keys, ',')
+    end
+
+    return headers
 end
 
 -- Whether breaks are usable at all (config + backend support)
